@@ -1,0 +1,46 @@
+# =========================================
+# 🧩 METABASE / MYSQL / ETL PROJECT GITIGNORE
+# =========================================
+
+# --- Runtime Data (never commit actual databases)
+mysql_data/
+metabase_data/
+logs/
+
+# --- Docker and Build Artifacts
+*.pid
+*.sock
+*.tmp
+*.log
+*.bak
+*.backup
+*.err
+
+# --- Local environment and credentials
+.env
+etl_config.env
+*.env.*
+
+# --- SQL Dumps and Backups
+*.sql
+*.sql.gz
+*.dump
+*.tar
+*.zip
+
+# --- Editor / OS Files
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+*.swp
+*~
+
+# --- Python / Shell Cache (if any)
+__pycache__/
+*.pyc
+
+# --- Temporary folders
+tmp/
+test/
+backup/
