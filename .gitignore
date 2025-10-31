@@ -16,10 +16,6 @@ logs/
 *.backup
 *.err
 
-# --- Local environment and credentials
-.env
-etl_config.env
-*.env.*
 
 # --- SQL Dumps and Backups
 *.sql

@@ -313,17 +313,31 @@ run_etl() {
   " > "temp_${COUNTRY}_order_items.tsv"
 
   echo "📥 Loading Order Items (no SKU yet) into local DB..."
-  mysql --local-infile=1 -h "$LOCAL_HOST" -u "$LOCAL_USER" -p"$LOCAL_PASS" -e "
-    USE woo_${COUNTRY,,};
-    DROP TABLE IF EXISTS order_items;
-    CREATE TABLE IF NOT EXISTS order_items LIKE woo_tr.order_items;
-    TRUNCATE TABLE order_items;
-    LOAD DATA LOCAL INFILE '$(pwd)/temp_${COUNTRY}_order_items.tsv'
-    INTO TABLE order_items
-    FIELDS TERMINATED BY '\t'
-    LINES TERMINATED BY '\n'
-    IGNORE 1 LINES;
-  "
+if [ "$COUNTRY" != "TR" ]; then
+  echo "🧱 Creating table order_items in woo_${COUNTRY,,}..."
+  mysql --local-infile=1 -h "$LOCAL_HOST" -u "$LOCAL_USER" -p"$LOCAL_PASS" <<EOF
+USE woo_${COUNTRY,,};
+CREATE TABLE IF NOT EXISTS order_items LIKE woo_tr.order_items;
+TRUNCATE TABLE order_items;
+LOAD DATA LOCAL INFILE '$(pwd)/temp_${COUNTRY}_order_items.tsv'
+INTO TABLE order_items
+FIELDS TERMINATED BY '\t'
+LINES TERMINATED BY '\n'
+IGNORE 1 LINES;
+EOF
+else
+  echo "⚙️ Skipping schema clone for TR (base schema already exists)."
+  mysql --local-infile=1 -h "$LOCAL_HOST" -u "$LOCAL_USER" -p"$LOCAL_PASS" <<EOF
+USE woo_tr;
+TRUNCATE TABLE order_items;
+LOAD DATA LOCAL INFILE '$(pwd)/temp_${COUNTRY}_order_items.tsv'
+INTO TABLE order_items
+FIELDS TERMINATED BY '\t'
+LINES TERMINATED BY '\n'
+IGNORE 1 LINES;
+EOF
+fi
+
   rm -f "temp_${COUNTRY}_order_items.tsv"
   echo "✅ Order Items for $COUNTRY loaded successfully."
 
@@ -564,13 +578,22 @@ run_etl() {
   " > "temp_${COUNTRY}_refunds_agg.tsv"
 
   # Step 4️⃣: Merge and load into local DB
-  echo "📥 Loading combined Customers data into woo_${COUNTRY,,}.customers ..."
+echo "📥 Loading combined Customers data into woo_${COUNTRY,,}.customers ..."
+
+if [ "$COUNTRY" != "TR" ]; then
   mysql -h "$LOCAL_HOST" -u "$LOCAL_USER" -p"$LOCAL_PASS" -e "
     USE woo_${COUNTRY,,};
-    DROP TABLE IF EXISTS customers;
     CREATE TABLE IF NOT EXISTS customers LIKE woo_tr.customers;
     TRUNCATE TABLE customers;
   "
+else
+  echo "⚙️ Skipping schema clone for TR (base schema already exists)."
+  mysql -h "$LOCAL_HOST" -u "$LOCAL_USER" -p"$LOCAL_PASS" -e "
+    USE woo_tr;
+    TRUNCATE TABLE customers;
+  "
+fi
+
 
   mysql --local-infile=1 -h "$LOCAL_HOST" -u "$LOCAL_USER" -p"$LOCAL_PASS" -e "
     USE woo_${COUNTRY,,};

@@ -1,0 +1,9 @@
+node_modules
+mysql_data
+metabase_data
+logs
+
+*.log
+.git
+
+docker-compose.yml
