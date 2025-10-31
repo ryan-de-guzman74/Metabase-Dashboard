@@ -18,7 +18,6 @@ logs/
 
 
 # --- SQL Dumps and Backups
-*.sql
 *.sql.gz
 *.dump
 *.tar
