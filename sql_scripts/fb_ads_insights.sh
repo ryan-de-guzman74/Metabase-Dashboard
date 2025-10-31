@@ -47,8 +47,9 @@ API_URL="https://graph.facebook.com/${API_VERSION}/act_${FB_AD_ACCOUNT_ID}/insig
 FIELDS="campaign_name,ad_name,adset_name,impressions,clicks,spend,actions"
 
 # Save JSON output to correct location
-OUTPUT_JSON="${LOG_BASE}/api_data/fb_ads_$(date +%Y-%m-%d_%H-%M-%S).json"
-
+TIMESTAMP=$(date +%Y-%m-%d_%H-%M-%S)
+OUTPUT_JSON="${LOG_BASE}/api_data/fb_ads_${TIMESTAMP}.json"
+OUTPUT_CSV="${LOG_BASE}/api_data/fb_ads_${TIMESTAMP}.csv"
 # Perform API call
 HTTP_RESPONSE=$(curl -s -w "%{http_code}" -o "$OUTPUT_JSON" -G "$API_URL" \
   -d "access_token=$FB_ACCESS_TOKEN" \
@@ -66,8 +67,32 @@ if [ "$HTTP_RESPONSE" != "200" ]; then
   cat "$OUTPUT_JSON"
   exit 1
 fi
+# ==========================================
+# 🔄 Convert JSON → CSV
+# ==========================================
+echo "🧮 Processing data → CSV..."
+if ! command -v jq &>/dev/null; then
+  echo "❌ 'jq' not found. Please install jq (apt install jq or yum install jq)."
+  exit 1
+fi
+
+# Extract key data fields
+jq -r '
+  (["campaign_name","ad_name","adset_name","impressions","clicks","spend","date_start","date_stop"] | @csv),
+  (.data[] | [
+    .campaign_name,
+    .ad_name,
+    .adset_name,
+    .impressions,
+    .clicks,
+    .spend,
+    .date_start,
+    .date_stop
+  ] | @csv)
+' "$OUTPUT_JSON" > "$OUTPUT_CSV"
 
 # ==========================================
-# ✅ Success
+# ✅ Done
 # ==========================================
-echo "✅ Facebook Ads data fetched successfully → saved to $OUTPUT_JSON"
+echo "✅ Facebook Ads data fetched successfully → JSON: $OUTPUT_JSON"
+echo "✅ Processed CSV file created at: $OUTPUT_CSV"
