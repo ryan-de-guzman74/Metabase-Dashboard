@@ -5,11 +5,11 @@ set -o pipefail
 # =========================================================
 # 🌍 Environment Detection — Works in Docker & Host
 # =========================================================
-if [ -f "/.dockerenv" ] || grep -qa "docker" /proc/1/cgroup 2>/dev/null; then
-  ENVIRONMENT="docker"
-else
-  ENVIRONMENT="host"
-fi
+#if [ -f "/.dockerenv" ] || grep -qa "docker" /proc/1/cgroup 2>/dev/null; then
+#  ENVIRONMENT="docker"
+#else
+#  ENVIRONMENT="host"
+#fi
 
 # =========================================================
 # 🌍 Universal Path Setup — Works on Both Docker & Ubuntu
@@ -19,11 +19,12 @@ fi
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 # Determine environment (Docker or Host)
-if grep -q docker /proc/1/cgroup 2>/dev/null; then
-  ENVIRONMENT="docker"
-else
-  ENVIRONMENT="host"
-fi
+#if grep -q docker /proc/1/cgroup 2>/dev/null; then
+#  ENVIRONMENT="docker"
+#else
+#  ENVIRONMENT="host"
+#fi
+echo "🐳 ENVIRONMENT=$ENVIRONMENT (from Compose)"
 
 # Load configuration
 if [ -f "$SCRIPT_DIR/etl_config.env" ]; then
@@ -1356,19 +1357,39 @@ run_master_categories_tags_etl() {
   rm -f temp_master_categories_tags.tsv
   echo "✅ Categories & Tags fields updated successfully in woo_master.products"
 }
+run_facebook_etl ()  {
+# ==========================================
+# 📈 Fetch Facebook Ads Insights via API
+# ==========================================
+echo "🚀 Starting Facebook Ads Insights fetch..."
+if [ "$ENVIRONMENT" = "docker" ]; then
+  bash /app/sql_scripts/fb_ads_insights.sh
+else
+  bash ./fb_ads_insights.sh
+fi
 
+
+if [ $? -eq 0 ]; then
+  echo "✅ Facebook Ads data fetched successfully."
+else
+  echo "⚠️ Facebook Ads fetch failed. Continuing other ETL tasks..."
+fi
+}
 
 # =========================================================
 # 🚀 Execute All ETL Steps    TR DE FR NL BE AT 
 # =========================================================
-for COUNTRY in  TR DE FR NL BE AT BEFRLU DK ES IT SE FI PT CZ HU RO SK UK ; do
-  run_etl "$COUNTRY"
-done
-run_etl_ops
-run_master_products_etl
-run_master_customers_etl
-run_master_returns_etl
-run_master_orders_etl
+#for COUNTRY in  TR DE FR NL BE AT BEFRLU DK ES IT SE FI PT CZ HU RO SK UK ; do
+#  run_etl "$COUNTRY"
+#done
+#run_etl_ops
+#run_master_products_etl
+#run_master_customers_etl
+#run_master_returns_etl
+#run_master_orders_etl
+
+run_facebook_etl
+
 run_master_categories_tags_etl
 run_master_product_gallery_map_etl
 run_master_product_images_etl

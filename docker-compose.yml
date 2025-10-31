@@ -49,16 +49,21 @@ services:
   etl:
     image: ubuntu:22.04
     restart: always
+    sysctls:
+      - net.ipv6.conf.all.disable_ipv6=1
     working_dir: /app
+    environment: 
+      - ENVIRONMENT=docker
     volumes:
-      - ./sql_scripts/setup_ecommerce_databases.sql:/app/sql_scripts/setup_ecommerce_databases.sql:rw
+      - ./sql_scripts:/app/sql_scripts:rw
       - ./sql_scripts/run_etl_live_all.sh:/app/run_etl_live_all.sh:rw
       - ./etl_config.env:/app/etl_config.env:rw
       - ./logs:/app/logs
     entrypoint: >
       /bin/bash -c "
+        export ENVIRONMENT=docker &&
         apt update -qq &&
-        apt install -y -qq mysql-client &&
+        apt install -y -qq mysql-client curl &&
         chmod +x /app/run_etl_live_all.sh &&
         mkdir -p /app/logs &&
         echo '⏳ Waiting for MySQL to be ready...' &&
