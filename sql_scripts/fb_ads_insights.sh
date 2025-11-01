@@ -47,7 +47,7 @@ DB_PASS=$LOCAL_PASS                    # 🆕
 DB_NAME="woo_master"                  # 🆕
 DB_PORT=$LOCAL_PORT
 # 🆕 NEW: Get latest date from advertisements table to fetch incrementally
-LAST_DATE=$(mysql -h "$DB_HOST" -P "$DB_PORT" -u"$DB_USER" -p"$DB_PASS" -Nse "SELECT MAX(date_stop) FROM ${DB_NAME}.advertisements;" 2>/dev/null)
+LAST_DATE=$(mysql --local-infile=1 -h "$DB_HOST" -P "$DB_PORT" -u"$DB_USER" -p"$DB_PASS" -Nse "SELECT MAX(date_stop) FROM ${DB_NAME}.advertisements;" 2>/dev/null)
 
 if [ -z "$LAST_DATE" ] || [ "$LAST_DATE" = "NULL" ]; then
   SINCE=$(date -d '60 days ago' +%Y-%m-%d)    # 🆕 Initial 60-day history
@@ -155,7 +155,7 @@ echo "✅ Saved CSV:  $OUTPUT_CSV"
 echo "💾 Inserting data into MySQL..."    # 🆕
 
 # 🆕 NEW: Bulk insert into woo_master.advertisements
-mysql -h "$DB_HOST" -u "$DB_USER" -P "$DB_PORT" -p"$DB_PASS" "$DB_NAME" <<EOF
+mysql --local-infile=1 -h "$DB_HOST" -u "$DB_USER" -P "$DB_PORT" -p"$DB_PASS" "$DB_NAME" <<EOF
 DROP TEMPORARY TABLE IF EXISTS tmp_ads_import;
 CREATE TEMPORARY TABLE tmp_ads_import LIKE advertisements;
 

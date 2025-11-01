@@ -63,7 +63,7 @@ services:
       /bin/bash -c "
         export ENVIRONMENT=docker &&
         apt update -qq &&
-        apt install -y -qq mysql-client curl &&
+        apt install -y -qq mysql-client curl jq &&
         chmod +x /app/run_etl_live_all.sh &&
         mkdir -p /app/logs &&
         echo '⏳ Waiting for MySQL to be ready...' &&
