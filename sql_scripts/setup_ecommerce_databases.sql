@@ -220,6 +220,24 @@ CREATE TABLE IF NOT EXISTS returns (
   created_at DATETIME DEFAULT CURRENT_TIMESTAMP
 );
 
+USE woo_master;
+
+DROP TABLE IF EXISTS advertisements;
+CREATE TABLE advertisements (
+  id BIGINT AUTO_INCREMENT PRIMARY KEY,
+  campaign_name VARCHAR(255),
+  ad_name VARCHAR(255),
+  adset_name VARCHAR(255),
+  impressions INT,
+  clicks INT,
+  spend DECIMAL(12,2),
+  cpc DECIMAL(10,4),
+  purchase_roas DECIMAL(10,4),
+  date_start DATE,
+  date_stop DATE,
+  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  UNIQUE KEY uniq_ad_date (ad_name, date_start)
+);
 
 SELECT '✅ Production schema setup complete.' AS status;
 
