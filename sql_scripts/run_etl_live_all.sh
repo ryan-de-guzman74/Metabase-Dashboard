@@ -16,7 +16,7 @@ run_mysql_query() {
 
   for ((attempt=1; attempt<=MAX_RETRIES; attempt++)); do
     echo "⚙️  [Attempt $attempt/$MAX_RETRIES] Running MySQL query on $DB ..."
-    mysql --ssl-mode=DISABLED -h "$HOST" -P 3306 -u "$USER" -p"$PASS" "$DB" -e "$QUERY" && return 0
+    mysql  --local-infile=1 --ssl-mode=DISABLED -h "$HOST" -P 3306 -u "$USER" -p"$PASS" "$DB" -e "$QUERY" && return 0
     echo "⚠️  Query failed (network/timeout?). Retrying in ${RETRY_DELAY}s..."
     sleep $RETRY_DELAY
     RETRY_DELAY=$((RETRY_DELAY * 2)) # exponential backoff
@@ -398,18 +398,17 @@ if [ "$COUNTRY" != "TR" ]; then
     FIELDS TERMINATED BY '\t'
     LINES TERMINATED BY '\n'
     IGNORE 1 LINES;
-  EOF
+  "
 else
   echo "⚙️ Skipping schema clone for TR (base schema already exists)."
   run_mysql_query "$LOCAL_HOST" "$LOCAL_USER" "$LOCAL_PASS" "woo_tr" "
-USE woo_tr;
-TRUNCATE TABLE order_items;
-LOAD DATA LOCAL INFILE '$(pwd)/temp_${COUNTRY}_order_items.tsv'
-INTO TABLE order_items
-FIELDS TERMINATED BY '\t'
-LINES TERMINATED BY '\n'
-IGNORE 1 LINES;
-EOF
+    TRUNCATE TABLE order_items;
+    LOAD DATA LOCAL INFILE '$(pwd)/temp_${COUNTRY}_order_items.tsv'
+    INTO TABLE order_items
+    FIELDS TERMINATED BY '\t'
+    LINES TERMINATED BY '\n'
+    IGNORE 1 LINES;
+  "
 fi
 
   rm -f "temp_${COUNTRY}_order_items.tsv"
@@ -1092,7 +1091,7 @@ run_master_product_gallery_map_etl() {
   # Step 3️⃣: Load into local normalized table
   echo "📥 Creating temporary product_gallery_map and loading data..."
 
-  run_mysql_query "HOST" "$USER" "$_PASS" "woo_master" "
+  run_mysql_query "$HOST" "$USER" "$PASS" "woo_master" "
     DROP TABLE IF EXISTS product_gallery_map;  -- 🧹 ensure old version removed
     CREATE TABLE product_gallery_map (         -- 🟩 temporary in ETL only
       product_id BIGINT,
@@ -1119,10 +1118,6 @@ run_master_product_images_etl() {
   echo "🖼️ Updating Master Product Image URLs (normalized join)..."
 
   run_mysql_query "$LOCAL_HOST" "$LOCAL_USER" "$LOCAL_PASS" "woo_master" "
-  mysql -h "$LOCAL_HOST" -u "$LOCAL_USER" -p"$LOCAL_PASS" -e "
-    USE woo_master;
-
-    -- Preload image URLs from OPS
     DROP TABLE IF EXISTS temp_image_urls;
     CREATE TABLE temp_image_urls (
       image_id BIGINT,
@@ -1131,7 +1126,6 @@ run_master_product_images_etl() {
   "
 
   IFS=',' read -r HOST DB USER PASS <<< "${REMOTE_DBS["OPS"]}"
-  mysql -h "$HOST" -u "$USER" -p"$PASS" "$DB" -e "
   run_mysql_query "$LOCAL_HOST" "$LOCAL_USER" "$LOCAL_PASS" "$DB" "
     SELECT ID AS image_id, guid AS image_url
     FROM wp_posts
@@ -1147,7 +1141,7 @@ run_master_product_images_etl() {
   "
 
   # ✅ Now join normalized map + URLs to update products
-  run_mysql_query "$LOCAL_HOST" "$LOCAL_USER" "$LOCAL_PASS" " "
+  run_mysql_query "$LOCAL_HOST" "$LOCAL_USER" "$LOCAL_PASS" " 
     SET SESSION group_concat_max_len = 1000000;  -- 🧠 allow long URL lists
 
     UPDATE products p
@@ -1201,7 +1195,6 @@ run_master_categories_tags_etl() {
   " 2>/dev/null || true
 
   run_mysql_query "$LOCAL_HOST" "$LOCAL_USER" "$LOCAL_PASS" "" "
-  mysql --local-infile=1 -h "$LOCAL_HOST" -u "$LOCAL_USER" -p"$LOCAL_PASS" -e "
     USE woo_master;
 
     -- Create temp table for category/tag mapping
