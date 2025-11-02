@@ -16,7 +16,7 @@ run_mysql_query() {
 
   for ((attempt=1; attempt<=MAX_RETRIES; attempt++)); do
     echo "⚙️  [Attempt $attempt/$MAX_RETRIES] Running MySQL query on $DB ..."
-    mysql  --local-infile=1 --ssl-mode=DISABLED -h "$HOST" -P 3306 -u "$USER" -p"$PASS" "$DB" -e "$QUERY" && return 0
+    mysql  --local-infile=1 -h "$HOST" -P 3306 -u "$USER" -p"$PASS" "$DB" -e "$QUERY" && return 0
     echo "⚠️  Query failed (network/timeout?). Retrying in ${RETRY_DELAY}s..."
     sleep $RETRY_DELAY
     RETRY_DELAY=$((RETRY_DELAY * 2)) # exponential backoff
@@ -813,8 +813,7 @@ run_master_products_etl() {
 run_master_orders_etl() {
   echo "🧩 Building Master Orders and Order Items Tables from all stores ..."
 
-  run_mysql_query "$LOCAL_HOST" "$LOCAL_USER" "$LOCAL_PASS" "" "
-    USE woo_master;
+  run_mysql_query "$LOCAL_HOST" "$LOCAL_USER" "$LOCAL_PASS" "woo_master" "
     TRUNCATE TABLE orders;
     TRUNCATE TABLE order_items;
   "
@@ -843,54 +842,66 @@ run_master_orders_etl() {
 
     NAME_SELECT=$([ "$HAS_NAME" -eq 1 ] && echo "oi.order_item_name" || echo "NULL")
 
-    run_mysql_query "$LOCAL_HOST" "$LOCAL_USER" "$LOCAL_PASS" "woo_master" "    
-      INSERT INTO woo_master.orders (
-        order_number_formatted, source_store, order_id, order_date, order_status,
-        customer_id, country_code, channel, site, billing_country, billing_city,
-        units_total, ordered_items_count, ordered_items_skus, payment_method,
-        currency_code, subtotal, gross_total, cogs, total_price,
-        tax_amount, shipping_fee, fee_amount, discount_amount,
-        refunded_amount, ads_spend, logistics_cost, other_costs,
-        net_profit, net_revenue, net_margin
-      )
-      SELECT
-  COALESCE(NULLIF(TRIM(o.order_number_formatted), ''), CONCAT('ORD', o.order_id)) AS order_number_formatted,
-  '$COUNTRY' AS source_store,
-  o.order_id, o.order_date, o.order_status, o.customer_id,
-  o.country_code, o.channel, o.site, o.billing_country, o.billing_city,
-  o.units_total, o.ordered_items_count, o.ordered_items_skus, o.payment_method,
-  o.currency_code, o.subtotal, o.gross_total, o.cogs, o.total_price,
-  o.tax_amount, o.shipping_fee, o.fee_amount, o.discount_amount,
-  o.refunded_amount, o.ads_spend, o.logistics_cost, o.other_costs,
-  o.net_profit, o.net_revenue, o.net_margin
-      FROM woo_${COUNTRY,,}.orders o
-WHERE o.order_number_formatted IS NOT NULL
-  AND o.order_number_formatted <> ''
-  AND LENGTH(TRIM(o.order_number_formatted)) > 0
-  AND o.order_number_formatted <> 'NULL';
+run_mysql_query "$LOCAL_HOST" "$LOCAL_USER" "$LOCAL_PASS" "woo_master" "
+  SET SESSION sql_mode = REPLACE(REPLACE(@@sql_mode, 'STRICT_TRANS_TABLES', ''), 'NO_ZERO_DATE', '');
+  INSERT INTO woo_master.orders (
+    order_number_formatted, source_store, order_id, order_date, order_status,
+    customer_id, country_code, channel, site, billing_country, billing_city,
+    units_total, ordered_items_count, ordered_items_skus, payment_method,
+    currency_code, subtotal, gross_total, cogs, total_price,
+    tax_amount, shipping_fee, fee_amount, discount_amount,
+    refunded_amount, ads_spend, logistics_cost, other_costs,
+    net_profit, net_revenue, net_margin
+  )
+  SELECT
+    COALESCE(NULLIF(TRIM(o.order_number_formatted), ''), CONCAT('ORD', o.order_id)),
+    '$COUNTRY',
+    o.order_id,
+CASE
+  WHEN o.order_date IS NULL
+       OR TRIM(o.order_date) = ''
+       OR o.order_date IN ('0000-00-00', '0000-00-00 00:00:00')
+  THEN NULL
+  WHEN STR_TO_DATE(o.order_date, '%Y-%m-%d %H:%i:%s') IS NOT NULL
+  THEN STR_TO_DATE(o.order_date, '%Y-%m-%d %H:%i:%s')
+  ELSE NULL
+END AS order_date,
+    o.order_status, o.customer_id,
+    o.country_code, o.channel, o.site, o.billing_country, o.billing_city,
+    o.units_total, o.ordered_items_count, o.ordered_items_skus, o.payment_method,
+    o.currency_code, o.subtotal, o.gross_total, o.cogs, o.total_price,
+    o.tax_amount, o.shipping_fee, o.fee_amount, o.discount_amount,
+    o.refunded_amount, o.ads_spend, o.logistics_cost, o.other_costs,
+    o.net_profit, o.net_revenue, o.net_margin
+  FROM woo_${COUNTRY,,}.orders o
+  WHERE o.order_number_formatted IS NOT NULL
+    AND o.order_number_formatted <> ''
+    AND LENGTH(TRIM(o.order_number_formatted)) > 0
+    AND o.order_number_formatted <> 'NULL';
+"
 
+run_mysql_query "$LOCAL_HOST" "$LOCAL_USER" "$LOCAL_PASS" "woo_master" "
+  INSERT INTO order_items (
+    order_item_id, order_id, product_id, variation_id, sku,
+    order_item_name, quantity, line_total, line_tax,
+    refund_reference, currency_code, source_store
+  )
+  SELECT
+    oi.order_item_id,
+    oi.order_id,
+    oi.product_id,
+    oi.variation_id,
+    oi.sku,
+    oi.order_item_name,
+    oi.quantity,
+    oi.line_total,
+    oi.line_tax,
+    oi.refund_reference,
+    oi.currency_code,
+    '$COUNTRY'
+  FROM woo_${COUNTRY,,}.order_items oi;
+"
 
-
-      INSERT INTO order_items (
-        order_item_id, order_id, product_id, variation_id, sku,
-        order_item_name, quantity, line_total, line_tax,
-        refund_reference, currency_code, source_store
-      )
-      SELECT
-        oi.order_item_id,
-        oi.order_id,
-        oi.product_id,
-        oi.variation_id,
-        oi.sku,
-        ${NAME_SELECT},
-        oi.quantity,
-        oi.line_total,
-        oi.line_tax,
-        oi.refund_reference,
-        oi.currency_code,
-        '$COUNTRY'
-      FROM woo_${COUNTRY,,}.order_items oi;
-    "
   done
 
   echo "✅ Master Orders and Order Items tables merged successfully."
@@ -1091,7 +1102,7 @@ run_master_product_gallery_map_etl() {
   # Step 3️⃣: Load into local normalized table
   echo "📥 Creating temporary product_gallery_map and loading data..."
 
-  run_mysql_query "$HOST" "$USER" "$PASS" "woo_master" "
+  run_mysql_query "$LOCAL_HOST" "$LOCAL_USER" "$LOCAL_PASS" "woo_master" "
     DROP TABLE IF EXISTS product_gallery_map;  -- 🧹 ensure old version removed
     CREATE TABLE product_gallery_map (         -- 🟩 temporary in ETL only
       product_id BIGINT,
@@ -1126,7 +1137,7 @@ run_master_product_images_etl() {
   "
 
   IFS=',' read -r HOST DB USER PASS <<< "${REMOTE_DBS["OPS"]}"
-  run_mysql_query "$LOCAL_HOST" "$LOCAL_USER" "$LOCAL_PASS" "$DB" "
+  run_mysql_query "$HOST" "$USER" "$PASS" "$DB" "
     SELECT ID AS image_id, guid AS image_url
     FROM wp_posts
     WHERE post_type='attachment' AND post_mime_type LIKE 'image/%';
@@ -1141,7 +1152,7 @@ run_master_product_images_etl() {
   "
 
   # ✅ Now join normalized map + URLs to update products
-  run_mysql_query "$LOCAL_HOST" "$LOCAL_USER" "$LOCAL_PASS" " 
+  run_mysql_query "$LOCAL_HOST" "$LOCAL_USER" "$LOCAL_PASS" "woo_master" " 
     SET SESSION group_concat_max_len = 1000000;  -- 🧠 allow long URL lists
 
     UPDATE products p
@@ -1187,42 +1198,50 @@ run_master_categories_tags_etl() {
     GROUP BY tr.object_id;
   " > temp_master_categories_tags.tsv
 
-  # ✅ Load into local master DB
-  echo "🧩 Loading into woo_master.products..."
-    # 💡 Run this small command separately — avoids DROP INDEX parser issue
-  run_mysql_query "$LOCAL_HOST" "$LOCAL_USER" "$LOCAL_PASS" "" "
-    DROP INDEX idx_product_id ON woo_master.temp_categories_tags;
-  " 2>/dev/null || true
-
-  run_mysql_query "$LOCAL_HOST" "$LOCAL_USER" "$LOCAL_PASS" "" "
-    USE woo_master;
-
-    -- Create temp table for category/tag mapping
+  # ✅ Step 2: Prepare target temp table
+  echo "🧱 Preparing temp table in woo_master..."
+  run_mysql_query "$LOCAL_HOST" "$LOCAL_USER" "$LOCAL_PASS" "woo_master" "
     DROP TABLE IF EXISTS temp_categories_tags;
     CREATE TABLE temp_categories_tags (
       product_id BIGINT,
       categories TEXT,
       tags TEXT
     );
+  "
 
+  # ✅ Step 3: Load extracted TSV file
+  echo "📥 Loading category/tag data into temp table..."
+  run_mysql_query "$LOCAL_HOST" "$LOCAL_USER" "$LOCAL_PASS" "woo_master" "
     LOAD DATA LOCAL INFILE '$(pwd)/temp_master_categories_tags.tsv'
     INTO TABLE temp_categories_tags
     FIELDS TERMINATED BY '\t'
     LINES TERMINATED BY '\n'
     IGNORE 1 LINES
     (product_id, categories, tags);
+  "
+
+  # ✅ Step 4: Create index
+  echo "⚙️  Creating index for fast joins..."
+  run_mysql_query "$LOCAL_HOST" "$LOCAL_USER" "$LOCAL_PASS" "woo_master" "
     CREATE INDEX idx_temp_product_id ON temp_categories_tags (product_id);
-    
-    -- Update master products table with extracted categories and tags
-    UPDATE woo_master.products p
+  " 2>/dev/null || true
+
+  # ✅ Step 5: Update products table
+  echo "🔗 Updating master products table..."
+  run_mysql_query "$LOCAL_HOST" "$LOCAL_USER" "$LOCAL_PASS" "woo_master" "
+    UPDATE products p
     INNER JOIN temp_categories_tags ct ON p.product_id = ct.product_id
     SET p.categories = ct.categories,
         p.tags = ct.tags;
-
-    DROP TABLE temp_categories_tags;
   "
 
+  # ✅ Step 6: Cleanup
+  echo "🧹 Cleaning up temp files..."
+  run_mysql_query "$LOCAL_HOST" "$LOCAL_USER" "$LOCAL_PASS" "woo_master" "
+    DROP TABLE IF EXISTS temp_categories_tags;
+  "
   rm -f temp_master_categories_tags.tsv
+
   echo "✅ Categories & Tags fields updated successfully in woo_master.products"
 }
 
@@ -1230,13 +1249,13 @@ run_master_categories_tags_etl() {
 # =========================================================
 # 🚀 Execute All ETL Steps    TR DE FR NL BE AT 
 # =========================================================
-for COUNTRY in TR DE FR NL BE AT BEFRLU DK ES IT SE FI PT CZ HU RO SK UK OPS; do
-  run_etl "$COUNTRY"
-done
-run_etl OPS
-run_master_products_etl
-run_master_customers_etl
-run_master_returns_etl
+#for COUNTRY in TR DE FR NL BE AT BEFRLU DK ES IT SE FI PT CZ HU RO SK UK OPS; do
+#  run_etl "$COUNTRY"
+#done
+#run_etl OPS
+#run_master_products_etl
+#run_master_customers_etl
+#run_master_returns_etl
 run_master_orders_etl
 run_master_categories_tags_etl
 run_master_product_gallery_map_etl

@@ -148,7 +148,7 @@ CREATE TABLE woo_master.orders (
   net_profit DECIMAL(12,2),
   net_revenue DECIMAL(12,2),
   net_margin DECIMAL(8,2),
-  PRIMARY KEY (order_number_formatted),
+  PRIMARY KEY (order_number_formatted, source_store),
   INDEX idx_orders_customer (customer_id)
 );
 
