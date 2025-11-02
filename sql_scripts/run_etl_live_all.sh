@@ -24,7 +24,6 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 #else
 #  ENVIRONMENT="host"
 #fi
-echo "🐳 ENVIRONMENT=$ENVIRONMENT (from Compose)"
 
 # Load configuration
 if [ -f "$SCRIPT_DIR/etl_config.env" ]; then
@@ -69,8 +68,27 @@ run_etl() {
   # 🟡 1️⃣ Extract Orders
   # =========================================================
   echo "📦 Extracting Orders for $COUNTRY ..."
+      # 🆕 With a special conditional tweak for OPS only
+    if [ "$COUNTRY" = "OPS" ]; then
+      echo "🔎 Detected OPS — applying marketplace filters..."
+      EXTRA_FILTER="AND p.ID IN (
+        SELECT post_id FROM wp_postmeta
+        WHERE meta_key='_payment_method' AND meta_value IN ('bol','other')
+      )"
+    else
+      EXTRA_FILTER=""
+    fi
+    # 🧠 Special handling for TR: order_number_formatted = order_id
+if [ "$COUNTRY" = "TR" ]; then
+  echo "⚙️ Using order_id as order_number_formatted for TR (no _order_number_formatted key)..."
+  ORDER_NUMBER_FIELD="CAST(p.ID AS CHAR) AS order_number_formatted"
+else
+  ORDER_NUMBER_FIELD="MAX(CASE WHEN pm.meta_key = '_order_number_formatted' THEN pm.meta_value END) AS order_number_formatted"
+fi
+
   mysql -h "$HOST" -P 3306 -u "$USER" -p"$PASS" "$DB" -e "
     SELECT DISTINCT
+      $ORDER_NUMBER_FIELD,
       p.ID AS order_id,
       p.post_date AS order_date,
       p.post_status AS order_status,
@@ -240,6 +258,7 @@ run_etl() {
     FROM wp_posts p
     LEFT JOIN wp_postmeta pm ON p.ID = pm.post_id
     WHERE p.post_type IN ('shop_order', 'shop_order_refund')
+    $EXTRA_FILTER
     GROUP BY p.ID;
   " > "temp_${COUNTRY}_orders.tsv"
 
@@ -272,7 +291,7 @@ run_etl() {
     LINES TERMINATED BY '\n'
     IGNORE 1 LINES
     (
-      order_id, order_date, order_status, customer_id, country_code, channel, site,
+      order_number_formatted, order_id, order_date, order_status, customer_id, country_code, channel, site,
       billing_country, billing_city, units_total, ordered_items_count,
       ordered_items_skus, payment_method, currency_code, total_price,
       gross_total, subtotal, cogs, tax_amount, shipping_fee, fee_amount,
@@ -671,188 +690,6 @@ fi
 }
 
 # =========================================================
-# 🏗️  SPECIAL ETL: OPS SITE (Marketplace Orders Only)
-# =========================================================
-run_etl_ops() {
-  COUNTRY="OPS"
-  echo "🚀 Starting ETL for OPS site (Marketplace Orders Only)..."
-
-  IFS=',' read -r HOST DB USER PASS <<< "${REMOTE_DBS[$COUNTRY]}"
-
-  if [ -z "$HOST" ]; then
-    echo "❌ No remote configuration found for OPS"
-    return
-  fi
-
-  # =========================================================
-  # 1️⃣ Extract and Load Orders (All Orders First)
-  # =========================================================
-  echo "📦 Extracting all orders from OPS..."
-  mysql  --local-infile=1 -h "$HOST" -P 3306 -u "$USER" -p"$PASS" "$DB" -e "
-    SELECT DISTINCT
-      p.ID AS order_id,
-      p.post_date AS order_date,
-      p.post_status AS order_status,
-      MAX(CASE WHEN pm.meta_key = '_customer_user' THEN pm.meta_value END) AS customer_id,
-      'OPS' AS country_code,
-      'WOO-OPS' AS channel,
-      MAX(CASE WHEN pm.meta_key = '_billing_country' THEN pm.meta_value END) AS billing_country,
-      MAX(CASE WHEN pm.meta_key = '_billing_city' THEN pm.meta_value END) AS billing_city,
-      MAX(CASE WHEN pm.meta_key = '_payment_method' THEN pm.meta_value END) AS payment_method,
-      MAX(CASE WHEN pm.meta_key = '_order_currency' THEN pm.meta_value END) AS currency_code,
-      MAX(CASE WHEN pm.meta_key = '_order_total' THEN pm.meta_value END) AS total_price
-    FROM wp_posts p
-    LEFT JOIN wp_postmeta pm ON p.ID = pm.post_id
-    WHERE p.post_type IN ('shop_order','shop_order_refund')
-    GROUP BY p.ID;
-  " > "temp_ops_orders.tsv"
-
-  echo "📥 Loading OPS orders into local DB..."
-  mysql  --local-infile=1 -h "$LOCAL_HOST" -u "$LOCAL_USER" -p"$LOCAL_PASS" -e "
-    CREATE DATABASE IF NOT EXISTS woo_ops;
-    USE woo_ops;
-    DROP TABLE IF EXISTS orders;
-    CREATE TABLE orders LIKE woo_tr.orders;
-    LOAD DATA LOCAL INFILE '$(pwd)/temp_ops_orders.tsv'
-    INTO TABLE orders
-    FIELDS TERMINATED BY '\t' LINES TERMINATED BY '\n' IGNORE 1 LINES;
-  "
-  rm -f "temp_ops_orders.tsv"
-  echo "✅ OPS orders loaded locally."
-
-  # =========================================================
-  # 2️⃣ Extract Order Items (same as standard stores)
-  # =========================================================
-  echo "📦 Extracting order items for OPS..."
-  mysql  --local-infile=1 -h "$HOST" -P 3306 -u "$USER" -p"$PASS" "$DB" -e "
-    SELECT
-      oi.order_item_id,
-      oi.order_id,
-      MAX(CASE WHEN oim.meta_key = '_product_id' THEN oim.meta_value END) AS product_id,
-      MAX(CASE WHEN oim.meta_key = '_variation_id' THEN oim.meta_value END) AS variation_id,
-      oi.order_item_name,
-      MAX(CASE WHEN oim.meta_key = '_qty' THEN oim.meta_value END) AS quantity,
-      MAX(CASE WHEN oim.meta_key = '_line_total' THEN oim.meta_value END) AS line_total,
-      MAX(CASE WHEN oim.meta_key = '_line_tax' THEN oim.meta_value END) AS line_tax
-    FROM wp_woocommerce_order_items oi
-    LEFT JOIN wp_woocommerce_order_itemmeta oim ON oi.order_item_id = oim.order_item_id
-    GROUP BY oi.order_item_id, oi.order_id;
-  " > "temp_ops_order_items.tsv"
-
-  mysql --local-infile=1 -h "$LOCAL_HOST" -u "$LOCAL_USER" -p"$LOCAL_PASS" -e "
-    USE woo_ops;
-    DROP TABLE IF EXISTS order_items;
-    CREATE TABLE order_items LIKE woo_tr.order_items;
-    LOAD DATA LOCAL INFILE '$(pwd)/temp_ops_order_items.tsv'
-    INTO TABLE order_items
-    FIELDS TERMINATED BY '\t' LINES TERMINATED BY '\n' IGNORE 1 LINES;
-  "
-  rm -f "temp_ops_order_items.tsv"
-  echo "✅ OPS order items loaded successfully."
-
-  # =========================================================
-  # 3️⃣ Extract Customers
-  # =========================================================
-  echo "👤 Extracting customers for OPS..."
-  mysql  --local-infile=1 -h "$HOST" -P 3306 -u "$USER" -p"$PASS" "$DB" -e "
-    SELECT
-      u.ID AS customer_id,
-      CONCAT_WS(' ', fn.meta_value, ln.meta_value) AS full_name,
-      LOWER(u.user_email) AS email,
-      bp.meta_value AS phone,
-      u.user_registered AS registered_at,
-      bc.meta_value AS billing_country,
-      bci.meta_value AS billing_city
-    FROM wp_users u
-    LEFT JOIN wp_usermeta fn  ON u.ID = fn.user_id  AND fn.meta_key  = 'first_name'
-    LEFT JOIN wp_usermeta ln  ON u.ID = ln.user_id  AND ln.meta_key  = 'last_name'
-    LEFT JOIN wp_usermeta bp  ON u.ID = bp.user_id  AND bp.meta_key  = 'billing_phone'
-    LEFT JOIN wp_usermeta bc  ON u.ID = bc.user_id  AND bc.meta_key  = 'billing_country'
-    LEFT JOIN wp_usermeta bci ON u.ID = bci.user_id AND bci.meta_key = 'billing_city';
-  " > "temp_ops_customers.tsv"
-
-  mysql --local-infile=1 -h "$LOCAL_HOST" -u "$LOCAL_USER" -p"$LOCAL_PASS" -e "
-    USE woo_ops;
-    DROP TABLE IF EXISTS customers;
-    CREATE TABLE customers LIKE woo_tr.customers;
-    LOAD DATA LOCAL INFILE '$(pwd)/temp_ops_customers.tsv'
-    INTO TABLE customers
-    FIELDS TERMINATED BY '\t' LINES TERMINATED BY '\n' IGNORE 1 LINES;
-  "
-  rm -f "temp_ops_customers.tsv"
-  echo "✅ OPS customers loaded successfully."
-
-  # =========================================================
-  # 4️⃣ Merge into woo_master (Filtered)
-  # =========================================================
-  echo "🧩 Merging OPS marketplace orders (filtered) into woo_master..."
-mysql --local-infile=1 -h "$LOCAL_HOST" -u "$LOCAL_USER" -p"$LOCAL_PASS" -e "
-  USE woo_master;
-
-  -- 🧾 Insert Orders (explicit column mapping)
-  INSERT INTO orders (
-    order_number_formatted, source_store, order_id, order_date, order_status,
-    customer_id, country_code, channel, site, billing_country, billing_city,
-    units_total, ordered_items_count, ordered_items_skus, payment_method,
-    currency_code, subtotal, gross_total, cogs, total_price,
-    tax_amount, shipping_fee, fee_amount, discount_amount,
-    refunded_amount, ads_spend, logistics_cost, other_costs,
-    net_profit, net_revenue, net_margin
-  )
-  SELECT
-    CONCAT('OPS-', o.order_id) AS order_number_formatted,
-    'OPS' AS source_store,
-    o.order_id, o.order_date, o.order_status, o.customer_id,
-    o.country_code, o.channel, NULL AS site,
-    o.billing_country, o.billing_city,
-    o.units_total, o.ordered_items_count, o.ordered_items_skus,
-    o.payment_method, o.currency_code, o.subtotal, o.gross_total,
-    o.cogs, o.total_price, o.tax_amount, o.shipping_fee,
-    o.fee_amount, o.discount_amount, o.refunded_amount,
-    o.ads_spend, o.logistics_cost, o.other_costs,
-    o.net_profit, o.net_revenue, o.net_margin
-  FROM woo_ops.orders o
-  WHERE o.payment_method IN ('other', 'bol');
-
-  -- 📦 Insert Order Items (linked to valid OPS orders)
-  INSERT INTO order_items (
-    order_item_id, order_id, product_id, variation_id, sku,
-    order_item_name, quantity, line_total, line_tax,
-    refund_reference, currency_code, source_store
-  )
-  SELECT
-    oi.order_item_id, oi.order_id, oi.product_id, oi.variation_id,
-    oi.sku, oi.order_item_name, oi.quantity, oi.line_total,
-    oi.line_tax, oi.refund_reference, oi.currency_code,
-    'OPS' AS source_store
-  FROM woo_ops.order_items oi
-  JOIN woo_ops.orders o ON oi.order_id = o.order_id
-  WHERE o.payment_method IN ('other', 'bol');
-
-  -- 👥 Insert Customers (linked to valid OPS marketplace orders)
-  INSERT INTO customers (
-    customer_id, full_name, email, phone, registered_at,
-    first_order_date, last_order_date, orders_count, units_total,
-    ltv, aov, refunds_total, billing_country, billing_city,
-    source_store
-  )
-  SELECT DISTINCT
-    c.customer_id, c.full_name, c.email, c.phone, c.registered_at,
-    NULL AS first_order_date, NULL AS last_order_date,
-    NULL AS orders_count, NULL AS units_total, NULL AS ltv,
-    NULL AS aov, NULL AS refunds_total,
-    c.billing_country, c.billing_city,
-    'OPS' AS source_store
-  FROM woo_ops.customers c
-  JOIN woo_ops.orders o ON c.customer_id = o.customer_id
-  WHERE o.payment_method IN ('other', 'bol');
-"
-
-
-  echo "✅ OPS ETL (Marketplace Only) completed successfully."
-}
-
-# =========================================================
 # 🧠 5️⃣ Master Products ETL (OPS + PIM → woo_master.products)
 # =========================================================
 run_master_products_etl() {
@@ -925,13 +762,12 @@ run_master_orders_etl() {
   echo "🧩 Building Master Orders and Order Items Tables from all stores ..."
 
   mysql -h "$LOCAL_HOST" -u "$LOCAL_USER" -p"$LOCAL_PASS" -e "
-    CREATE DATABASE IF NOT EXISTS woo_master;
     USE woo_master;
     TRUNCATE TABLE orders;
     TRUNCATE TABLE order_items;
   "
 
-  for COUNTRY in TR DE FR NL BE BEFRLU AT DK ES IT SE FI PT CZ HU RO SK UK; do
+  for COUNTRY in OPS TR DE FR NL BE BEFRLU AT DK ES IT SE FI PT CZ HU RO SK UK; do
     echo "🔗 Merging orders and items for $COUNTRY ..."
     
   # ⚙️ Check if the store database exists first (safe check)
@@ -957,7 +793,7 @@ run_master_orders_etl() {
 
     mysql -h "$LOCAL_HOST" -u "$LOCAL_USER" -p"$LOCAL_PASS" -e "
       USE woo_master;
-      INSERT INTO orders (
+      INSERT INTO woo_master.orders (
         order_number_formatted, source_store, order_id, order_date, order_status,
         customer_id, country_code, channel, site, billing_country, billing_city,
         units_total, ordered_items_count, ordered_items_skus, payment_method,
@@ -967,36 +803,22 @@ run_master_orders_etl() {
         net_profit, net_revenue, net_margin
       )
       SELECT
-        CASE
-          WHEN '$COUNTRY' = 'TR' THEN CONCAT(o.order_id)
-          WHEN '$COUNTRY' = 'NL' THEN CONCAT('101-', o.order_id)
-          WHEN '$COUNTRY' = 'BE' THEN CONCAT('201-', o.order_id)
-          WHEN '$COUNTRY' = 'DE' THEN CONCAT('301-', o.order_id)
-          WHEN '$COUNTRY' = 'AT' THEN CONCAT('401-', o.order_id)
-          WHEN '$COUNTRY' = 'CZ' THEN CONCAT('461-', o.order_id)
-          WHEN '$COUNTRY' = 'HU' THEN CONCAT('441-', o.order_id)
-          WHEN '$COUNTRY' = 'BEFRLU' THEN CONCAT('241-', o.order_id)
-          WHEN '$COUNTRY' = 'FR' THEN CONCAT('501-', o.order_id)
-          WHEN '$COUNTRY' = 'RO' THEN CONCAT('531-', o.order_id)
-          WHEN '$COUNTRY' = 'SK' THEN CONCAT('561-', o.order_id)
-          WHEN '$COUNTRY' = 'FI' THEN CONCAT('641-', o.order_id)
-          WHEN '$COUNTRY' = 'PT' THEN CONCAT('741-', o.order_id)
-          WHEN '$COUNTRY' = 'ES' THEN CONCAT('701-', o.order_id)
-          WHEN '$COUNTRY' = 'IT' THEN CONCAT('801-', o.order_id)
-          WHEN '$COUNTRY' = 'SE' THEN CONCAT('901-', o.order_id)
-          WHEN '$COUNTRY' = 'DK' THEN CONCAT('601-', o.order_id)
-          WHEN '$COUNTRY' = 'UK' THEN CONCAT('161-', o.order_id)
-          ELSE CONCAT('$COUNTRY', '-', o.order_id)
-        END AS order_number_formatted,
-        '$COUNTRY' AS source_store,
-        o.order_id, o.order_date, o.order_status, o.customer_id,
-        o.country_code, o.channel, o.site, o.billing_country, o.billing_city,
-        o.units_total, o.ordered_items_count, o.ordered_items_skus, o.payment_method,
-        o.currency_code, o.subtotal, o.gross_total, o.cogs, o.total_price,
-        o.tax_amount, o.shipping_fee, o.fee_amount, o.discount_amount,
-        o.refunded_amount, o.ads_spend, o.logistics_cost, o.other_costs,
-        o.net_profit, o.net_revenue, o.net_margin
-      FROM woo_${COUNTRY,,}.orders o;
+  COALESCE(NULLIF(TRIM(o.order_number_formatted), ''), CONCAT('ORD', o.order_id)) AS order_number_formatted,
+  '$COUNTRY' AS source_store,
+  o.order_id, o.order_date, o.order_status, o.customer_id,
+  o.country_code, o.channel, o.site, o.billing_country, o.billing_city,
+  o.units_total, o.ordered_items_count, o.ordered_items_skus, o.payment_method,
+  o.currency_code, o.subtotal, o.gross_total, o.cogs, o.total_price,
+  o.tax_amount, o.shipping_fee, o.fee_amount, o.discount_amount,
+  o.refunded_amount, o.ads_spend, o.logistics_cost, o.other_costs,
+  o.net_profit, o.net_revenue, o.net_margin
+      FROM woo_${COUNTRY,,}.orders o
+WHERE o.order_number_formatted IS NOT NULL
+  AND o.order_number_formatted <> ''
+  AND LENGTH(TRIM(o.order_number_formatted)) > 0
+  AND o.order_number_formatted <> 'NULL';
+
+
 
       INSERT INTO order_items (
         order_item_id, order_id, product_id, variation_id, sku,
@@ -1357,43 +1179,22 @@ run_master_categories_tags_etl() {
   rm -f temp_master_categories_tags.tsv
   echo "✅ Categories & Tags fields updated successfully in woo_master.products"
 }
-run_facebook_etl ()  {
-# ==========================================
-# 📈 Fetch Facebook Ads Insights via API
-# ==========================================
-echo "🚀 Starting Facebook Ads Insights fetch..."
-if [ "$ENVIRONMENT" = "docker" ]; then
-  bash /app/sql_scripts/fb_ads_insights.sh
-else
-  bash ./fb_ads_insights.sh
-fi
 
-
-if [ $? -eq 0 ]; then
-  echo "✅ Facebook Ads data fetched successfully."
-else
-  echo "⚠️ Facebook Ads fetch failed. Continuing other ETL tasks..."
-fi
-}
 
 # =========================================================
 # 🚀 Execute All ETL Steps    TR DE FR NL BE AT 
 # =========================================================
-#for COUNTRY in  TR DE FR NL BE AT BEFRLU DK ES IT SE FI PT CZ HU RO SK UK ; do
-#  run_etl "$COUNTRY"
-#done
-#run_etl_ops
-#run_master_products_etl
-#run_master_customers_etl
-#run_master_returns_etl
-#run_master_orders_etl
-
-run_facebook_etl
-
+for COUNTRY in DE FR NL BE AT BEFRLU DK ES IT SE FI PT CZ HU RO SK UK OPS; do
+  run_etl "$COUNTRY"
+done
+run_etl OPS
+run_master_products_etl
+run_master_customers_etl
+run_master_returns_etl
+run_master_orders_etl
 run_master_categories_tags_etl
 run_master_product_gallery_map_etl
 run_master_product_images_etl
 
 echo "🎯 All ETL operations completed successfully."
-
 
