@@ -3,6 +3,30 @@ set -e
 set -o pipefail
 
 # =========================================================
+# 🔄 Reliable MySQL Runner with Retry Logic
+# =========================================================
+run_mysql_query() {
+  local HOST=$1
+  local USER=$2
+  local PASS=$3
+  local DB=$4
+  local QUERY=$5
+  local MAX_RETRIES=3
+  local RETRY_DELAY=5
+
+  for ((attempt=1; attempt<=MAX_RETRIES; attempt++)); do
+    echo "⚙️  [Attempt $attempt/$MAX_RETRIES] Running MySQL query on $DB ..."
+    mysql --ssl-mode=DISABLED -h "$HOST" -P 3306 -u "$USER" -p"$PASS" "$DB" -e "$QUERY" && return 0
+    echo "⚠️  Query failed (network/timeout?). Retrying in ${RETRY_DELAY}s..."
+    sleep $RETRY_DELAY
+    RETRY_DELAY=$((RETRY_DELAY * 2)) # exponential backoff
+  done
+
+  echo "❌ MySQL query failed after $MAX_RETRIES attempts — skipping this section."
+  return 1
+}
+
+# =========================================================
 # 🌍 Environment Detection — Works in Docker & Host
 # =========================================================
 #if [ -f "/.dockerenv" ] || grep -qa "docker" /proc/1/cgroup 2>/dev/null; then
@@ -115,7 +139,7 @@ else
   END AS order_number_formatted"
 fi
 
-  mysql -h "$HOST" -P 3306 -u "$USER" -p"$PASS" "$DB" -e "
+  run_mysql_query "$HOST" "$USER" "$PASS" "$DB" "
     SELECT DISTINCT
       $ORDER_NUMBER_FIELD,
       p.ID AS order_id,
@@ -293,7 +317,7 @@ fi
 
   echo "📥 Loading Orders into local DB..."
   echo "🧱 Ensuring local database woo_${COUNTRY,,} exists..."
-  mysql -h "$LOCAL_HOST" -u "$LOCAL_USER" -p"$LOCAL_PASS" -e "
+  run_mysql_query "$LOCAL_HOST" "$LOCAL_USER" "$LOCAL_PASS" "" "
     CREATE DATABASE IF NOT EXISTS woo_${COUNTRY,,};
   "
 
@@ -302,7 +326,7 @@ fi
   # =========================================================
   echo "🧱 Ensuring tables exist in woo_${COUNTRY,,}..."
   if [ "$COUNTRY" != "TR" ]; then
-    mysql -h "$LOCAL_HOST" -u "$LOCAL_USER" -p"$LOCAL_PASS" -e "
+    run_mysql_query "$LOCAL_HOST" "$LOCAL_USER" "$LOCAL_PASS" "" "
       USE woo_${COUNTRY,,};
       DROP TABLE IF EXISTS orders;
       CREATE TABLE IF NOT EXISTS orders LIKE woo_tr.orders;
@@ -311,7 +335,8 @@ fi
     echo "⚙️ Skipping table clone for TR (base schema already exists)."
   fi
 
-  mysql --local-infile=1 -h "$LOCAL_HOST" -u "$LOCAL_USER" -p"$LOCAL_PASS" -e "
+
+  run_mysql_query "$LOCAL_HOST" "$LOCAL_USER" "$LOCAL_PASS" "woo_${COUNTRY,,}" "
     USE woo_${COUNTRY,,};
     TRUNCATE TABLE orders;
     LOAD DATA LOCAL INFILE '$(pwd)/temp_${COUNTRY}_orders.tsv'
@@ -336,7 +361,7 @@ fi
   # 🟡 2️⃣ Extract Order Items (No SKU Yet)
   # =========================================================
   echo "📦 Extracting Order Items for $COUNTRY ..."
-  mysql -h "$HOST" -P 3306 -u "$USER" -p"$PASS" "$DB" -e "
+  run_mysql_query "$HOST" "$USER" "$PASS" "$DB" "
     SELECT
       oi.order_item_id,
       oi.order_id,
@@ -364,19 +389,19 @@ fi
   echo "📥 Loading Order Items (no SKU yet) into local DB..."
 if [ "$COUNTRY" != "TR" ]; then
   echo "🧱 Creating table order_items in woo_${COUNTRY,,}..."
-  mysql --local-infile=1 -h "$LOCAL_HOST" -u "$LOCAL_USER" -p"$LOCAL_PASS" <<EOF
-USE woo_${COUNTRY,,};
-CREATE TABLE IF NOT EXISTS order_items LIKE woo_tr.order_items;
-TRUNCATE TABLE order_items;
-LOAD DATA LOCAL INFILE '$(pwd)/temp_${COUNTRY}_order_items.tsv'
-INTO TABLE order_items
-FIELDS TERMINATED BY '\t'
-LINES TERMINATED BY '\n'
-IGNORE 1 LINES;
-EOF
+  run_mysql_query "$LOCAL_HOST" "$LOCAL_USER" "$LOCAL_PASS" "woo_${COUNTRY,,}" "
+    USE woo_${COUNTRY,,};
+    CREATE TABLE IF NOT EXISTS order_items LIKE woo_tr.order_items;
+    TRUNCATE TABLE order_items;
+    LOAD DATA LOCAL INFILE '$(pwd)/temp_${COUNTRY}_order_items.tsv'
+    INTO TABLE order_items
+    FIELDS TERMINATED BY '\t'
+    LINES TERMINATED BY '\n'
+    IGNORE 1 LINES;
+  EOF
 else
   echo "⚙️ Skipping schema clone for TR (base schema already exists)."
-  mysql --local-infile=1 -h "$LOCAL_HOST" -u "$LOCAL_USER" -p"$LOCAL_PASS" <<EOF
+  run_mysql_query "$LOCAL_HOST" "$LOCAL_USER" "$LOCAL_PASS" "woo_tr" "
 USE woo_tr;
 TRUNCATE TABLE order_items;
 LOAD DATA LOCAL INFILE '$(pwd)/temp_${COUNTRY}_order_items.tsv'
@@ -395,13 +420,13 @@ fi
   # 🟢 3️⃣ Update SKUs from PIM Database
   # =========================================================
   echo "🔍 Updating SKU values in order_items from PIM ..."
-  mysql -h 188.68.58.232 -u bi-dashboard-pim -p5rB4gGW6K76tu6A2gWXs -D mbu-trade-pim -e "
+  run_mysql_query "188.68.58.232" "bi-dashboard-pim" "5rB4gGW6K76tu6A2gWXs" "mbu-trade-pim" "
     SELECT product_id, sku
     FROM wp_wc_product_meta_lookup
     WHERE sku IS NOT NULL AND sku <> '';
   " > temp_pim_sku.tsv
 
-  mysql --local-infile=1 -h "$LOCAL_HOST" -u "$LOCAL_USER" -p"$LOCAL_PASS" -e "
+  run_mysql_query "$LOCAL_HOST" "$LOCAL_USER" "$LOCAL_PASS" "woo_${COUNTRY,,}" "
     USE woo_${COUNTRY,,};
     DROP TABLE IF EXISTS pim_sku_map;
     CREATE TABLE pim_sku_map (
@@ -415,7 +440,7 @@ fi
     IGNORE 1 LINES;
   "
 
-  mysql -h "$LOCAL_HOST" -u "$LOCAL_USER" -p"$LOCAL_PASS" -e "
+  run_mysql_query "$LOCAL_HOST" "$LOCAL_USER" "$LOCAL_PASS" "" "
     USE woo_${COUNTRY,,};
     UPDATE order_items oi
     LEFT JOIN pim_sku_map ps_parent ON ps_parent.product_id = oi.product_id
@@ -440,7 +465,7 @@ fi
 
   # --- Pull latest COGS from remote PIM ---
   IFS=',' read -r PIM_HOST PIM_DB PIM_USER PIM_PASS <<< "${REMOTE_DBS["PIM"]}"
-  mysql -h "$PIM_HOST" -u "$PIM_USER" -p"$PIM_PASS" -D "$PIM_DB" -e "
+  run_mysql_query "$PIM_HOST" "$PIM_USER" "$PIM_PASS" "$PIM_DB" "
     SELECT p.ID AS product_id,
            MAX(CAST(pm.meta_value AS DECIMAL(12,4))) AS cog_value
     FROM wp_postmeta pm
@@ -452,7 +477,7 @@ fi
   " > temp_pim_cogs.tsv
 
   # --- Load into local staging table ---
-  mysql --local-infile=1 -h "$LOCAL_HOST" -u "$LOCAL_USER" -p"$LOCAL_PASS" -e "
+  run_mysql_query "$LOCAL_HOST" "$LOCAL_USER" "$LOCAL_PASS" "" "
     CREATE DATABASE IF NOT EXISTS woo_master;
     USE woo_master;
     DROP TABLE IF EXISTS pim_cogs;
@@ -467,7 +492,7 @@ fi
   rm -f temp_pim_cogs.tsv
 
   # --- Update COGS in local orders ---
-  mysql -h "$LOCAL_HOST" -u "$LOCAL_USER" -p"$LOCAL_PASS" -e "
+  run_mysql_query "$LOCAL_HOST" "$LOCAL_USER" "$LOCAL_PASS" "" "
     USE woo_${COUNTRY,,};
     UPDATE orders o
     JOIN (
@@ -485,7 +510,7 @@ fi
     SET o.cogs = calc.total_cogs;
   "
   # Drop the staging table afterward
-  mysql -h "$LOCAL_HOST" -u "$LOCAL_USER" -p"$LOCAL_PASS" -e "
+  run_mysql_query "$LOCAL_HOST" "$LOCAL_USER" "$LOCAL_PASS" "" "
     USE woo_master;
     DROP TABLE IF EXISTS pim_cogs;
   "
@@ -496,7 +521,7 @@ fi
   # 💵 Calculate and Update Net Revenue, Profit, Margin
   # =========================================================
   echo "📊 Calculating Net Revenue, Net Profit, and Net Margin for $COUNTRY ..."
-  mysql -h "$LOCAL_HOST" -u "$LOCAL_USER" -p"$LOCAL_PASS" -e "
+  run_mysql_query "$LOCAL_HOST" "$LOCAL_USER" "$LOCAL_PASS" "" "
     USE woo_${COUNTRY,,};
 
     -- 🧩 Step 1: Ensure all numeric fields are non-null
@@ -553,7 +578,7 @@ fi
   echo "👤 Extracting and aggregating Customers for $COUNTRY ..."
 
   # Step 1️⃣: Extract base customer info
-  mysql -h "$HOST" -u "$USER" -p"$PASS" "$DB" -e "
+  run_mysql_query "$HOST" "$USER" "$PASS" "$DB" "" "
     SELECT
       u.ID AS customer_id,
       TRIM(
@@ -581,7 +606,7 @@ fi
   " > "temp_${COUNTRY}_customers_base.tsv"
 
   # Step 2️⃣: Aggregate order metrics
-  mysql -h "$HOST" -u "$USER" -p"$PASS" "$DB" -e "
+  run_mysql_query "$HOST" "$USER" "$PASS" "$DB" "  
     SELECT
       CAST(pm.meta_value AS UNSIGNED) AS customer_id,
       MIN(p.post_date) AS first_order_date,
@@ -598,7 +623,7 @@ fi
   " > "temp_${COUNTRY}_orders_agg.tsv"
 
   # Step 3️⃣: Aggregate units sold
-  mysql -h "$HOST" -u "$USER" -p"$PASS" "$DB" -e "
+  run_mysql_query "$HOST" "$USER" "$PASS" "$DB" "
     SELECT
       CAST(pm.meta_value AS UNSIGNED) AS customer_id,
       SUM(CASE WHEN oi.order_item_type = 'line_item' THEN 1 ELSE 0 END) AS units_total
@@ -610,7 +635,7 @@ fi
   " > "temp_${COUNTRY}_units_agg.tsv"
 
   # Step 3b️⃣: Aggregate refunds
-  mysql -h "$HOST" -u "$USER" -p"$PASS" "$DB" -e "
+  run_mysql_query "$HOST" "$USER" "$PASS" "$DB" "
     SELECT
       CAST(cust.meta_value AS UNSIGNED) AS customer_id,
       SUM(CAST(COALESCE(rm.meta_value, 0) AS DECIMAL(12,2))) AS refunds_total
@@ -630,21 +655,20 @@ fi
 echo "📥 Loading combined Customers data into woo_${COUNTRY,,}.customers ..."
 
 if [ "$COUNTRY" != "TR" ]; then
-  mysql -h "$LOCAL_HOST" -u "$LOCAL_USER" -p"$LOCAL_PASS" -e "
+  run_mysql_query "$LOCAL_HOST" "$LOCAL_USER" "$LOCAL_PASS" "" "
     USE woo_${COUNTRY,,};
     CREATE TABLE IF NOT EXISTS customers LIKE woo_tr.customers;
     TRUNCATE TABLE customers;
   "
 else
   echo "⚙️ Skipping schema clone for TR (base schema already exists)."
-  mysql -h "$LOCAL_HOST" -u "$LOCAL_USER" -p"$LOCAL_PASS" -e "
+  run_mysql_query "$LOCAL_HOST" "$LOCAL_USER" "$LOCAL_PASS" "" "
     USE woo_tr;
     TRUNCATE TABLE customers;
   "
 fi
 
-
-  mysql --local-infile=1 -h "$LOCAL_HOST" -u "$LOCAL_USER" -p"$LOCAL_PASS" -e "
+  run_mysql_query "$LOCAL_HOST" "$LOCAL_USER" "$LOCAL_PASS" "" "
     USE woo_${COUNTRY,,};
     CREATE TEMPORARY TABLE base (
       customer_id BIGINT, full_name VARCHAR(255), email VARCHAR(255),
@@ -730,7 +754,7 @@ run_master_products_etl() {
     return
   fi
 
-  mysql -h "$HOST" -u "$USER" -p"$PASS" "$DB" -e "
+  run_mysql_query "$HOST" "$USER" "$PASS" "$DB" "
     SELECT
       p.ID AS product_id,
       p.post_title AS title,
@@ -752,7 +776,7 @@ run_master_products_etl() {
   " > temp_master_products.tsv
 
   echo "🧩 Loading products into woo_master.products ..."
-  mysql --local-infile=1 -h "$LOCAL_HOST" -u "$LOCAL_USER" -p"$LOCAL_PASS" -e "
+  run_mysql_query "$LOCAL_HOST" "$LOCAL_USER" "$LOCAL_PASS" "" "
     CREATE DATABASE IF NOT EXISTS woo_master;
     USE woo_master;
     CREATE TABLE IF NOT EXISTS products (
@@ -790,7 +814,7 @@ run_master_products_etl() {
 run_master_orders_etl() {
   echo "🧩 Building Master Orders and Order Items Tables from all stores ..."
 
-  mysql -h "$LOCAL_HOST" -u "$LOCAL_USER" -p"$LOCAL_PASS" -e "
+  run_mysql_query "$LOCAL_HOST" "$LOCAL_USER" "$LOCAL_PASS" "" "
     USE woo_master;
     TRUNCATE TABLE orders;
     TRUNCATE TABLE order_items;
@@ -820,8 +844,7 @@ run_master_orders_etl() {
 
     NAME_SELECT=$([ "$HAS_NAME" -eq 1 ] && echo "oi.order_item_name" || echo "NULL")
 
-    mysql -h "$LOCAL_HOST" -u "$LOCAL_USER" -p"$LOCAL_PASS" -e "
-      USE woo_master;
+    run_mysql_query "$LOCAL_HOST" "$LOCAL_USER" "$LOCAL_PASS" "woo_master" "    
       INSERT INTO woo_master.orders (
         order_number_formatted, source_store, order_id, order_date, order_status,
         customer_id, country_code, channel, site, billing_country, billing_city,
@@ -888,7 +911,7 @@ run_master_returns_etl() {
   fi
 
   # Extract from Laravel portal schema
-  mysql -h "$HOST" -u "$USER" -p"$PASS" "$DB" -e "
+  run_mysql_query "$HOST" "$USER" "$PASS" "$DB" "
     SELECT
       s.order_id AS order_number,
       s.order_email,
@@ -916,7 +939,7 @@ run_master_returns_etl() {
 
   # Load into master DB
   echo "📥 Loading returns into woo_master.returns..."
-  mysql --local-infile=1 -h "$LOCAL_HOST" -u "$LOCAL_USER" -p"$LOCAL_PASS" -e "
+  run_mysql_query "$LOCAL_HOST" "$LOCAL_USER" "$LOCAL_PASS" "woo_master" "
     USE woo_master;
     TRUNCATE TABLE returns;
     LOAD DATA LOCAL INFILE '$(pwd)/temp_master_returns.tsv'
@@ -942,7 +965,7 @@ run_master_customers_etl() {
   echo "👥 Building Master Customers Table from all stores ..."
 
   # 🧹 Clean or create master table
-  mysql -h "$LOCAL_HOST" -u "$LOCAL_USER" -p"$LOCAL_PASS" -e "
+  run_mysql_query "$LOCAL_HOST" "$LOCAL_USER" "$LOCAL_PASS" "" "
     CREATE DATABASE IF NOT EXISTS woo_master;
     USE woo_master;
     CREATE TABLE IF NOT EXISTS customers (
@@ -984,8 +1007,7 @@ run_master_customers_etl() {
       continue
     fi
 
-    mysql -h "$LOCAL_HOST" -u "$LOCAL_USER" -p"$LOCAL_PASS" -e "
-      USE woo_master;
+    run_mysql_query "$LOCAL_HOST" "$LOCAL_USER" "$LOCAL_PASS" "woo_master" "
       INSERT INTO customers (
         customer_number_formatted, customer_id, full_name, email, phone,
         registered_at, first_order_date, last_order_date,
@@ -1050,7 +1072,7 @@ run_master_product_gallery_map_etl() {
 
   # Step 1️⃣: Extract product_id → comma-separated image_ids from OPS
   echo "📦 Extracting product → gallery IDs from OPS..."
-  mysql -h "$HOST" -u "$USER" -p"$PASS" "$DB" -e "
+  run_mysql_query "$HOST" "$USER" "$PASS" "$DB" "
     SELECT
       p.ID AS product_id,
       MAX(CASE WHEN pm.meta_key = '_product_image_gallery' THEN pm.meta_value END) AS image_ids
@@ -1069,8 +1091,8 @@ run_master_product_gallery_map_etl() {
 
   # Step 3️⃣: Load into local normalized table
   echo "📥 Creating temporary product_gallery_map and loading data..."
-  mysql --local-infile=1 -h "$LOCAL_HOST" -u "$LOCAL_USER" -p"$LOCAL_PASS" -e "
-    USE woo_master;
+
+  run_mysql_query "HOST" "$USER" "$_PASS" "woo_master" "
     DROP TABLE IF EXISTS product_gallery_map;  -- 🧹 ensure old version removed
     CREATE TABLE product_gallery_map (         -- 🟩 temporary in ETL only
       product_id BIGINT,
@@ -1096,6 +1118,7 @@ run_master_product_gallery_map_etl() {
 run_master_product_images_etl() {
   echo "🖼️ Updating Master Product Image URLs (normalized join)..."
 
+  run_mysql_query "$LOCAL_HOST" "$LOCAL_USER" "$LOCAL_PASS" "woo_master" "
   mysql -h "$LOCAL_HOST" -u "$LOCAL_USER" -p"$LOCAL_PASS" -e "
     USE woo_master;
 
@@ -1109,12 +1132,13 @@ run_master_product_images_etl() {
 
   IFS=',' read -r HOST DB USER PASS <<< "${REMOTE_DBS["OPS"]}"
   mysql -h "$HOST" -u "$USER" -p"$PASS" "$DB" -e "
+  run_mysql_query "$LOCAL_HOST" "$LOCAL_USER" "$LOCAL_PASS" "$DB" "
     SELECT ID AS image_id, guid AS image_url
     FROM wp_posts
     WHERE post_type='attachment' AND post_mime_type LIKE 'image/%';
   " > temp_master_image_urls.tsv
 
-  mysql --local-infile=1 -h "$LOCAL_HOST" -u "$LOCAL_USER" -p"$LOCAL_PASS" -e "
+  run_mysql_query "$LOCAL_HOST" "$LOCAL_USER" "$LOCAL_PASS" "woo_master" "
     USE woo_master;
     LOAD DATA LOCAL INFILE '$(pwd)/temp_master_image_urls.tsv'
     INTO TABLE temp_image_urls
@@ -1123,8 +1147,7 @@ run_master_product_images_etl() {
   "
 
   # ✅ Now join normalized map + URLs to update products
-  mysql -h "$LOCAL_HOST" -u "$LOCAL_USER" -p"$LOCAL_PASS" -e "
-    USE woo_master;
+  run_mysql_query "$LOCAL_HOST" "$LOCAL_USER" "$LOCAL_PASS" " "
     SET SESSION group_concat_max_len = 1000000;  -- 🧠 allow long URL lists
 
     UPDATE products p
@@ -1159,7 +1182,7 @@ run_master_categories_tags_etl() {
 
   # ✅ Extract category & tag data for all products
   echo "📦 Extracting Categories & Tags from OPS..."
-  mysql -h "$HOST" -u "$USER" -p"$PASS" "$DB" -e "
+  run_mysql_query "$HOST" "$USER" "$PASS" "$DB" "
     SELECT
       tr.object_id AS product_id,
       GROUP_CONCAT(DISTINCT CASE WHEN tt.taxonomy = 'product_cat' THEN t.name END SEPARATOR ',') AS categories,
@@ -1173,10 +1196,11 @@ run_master_categories_tags_etl() {
   # ✅ Load into local master DB
   echo "🧩 Loading into woo_master.products..."
     # 💡 Run this small command separately — avoids DROP INDEX parser issue
-  mysql -h "$LOCAL_HOST" -u "$LOCAL_USER" -p"$LOCAL_PASS" -e "
+  run_mysql_query "$LOCAL_HOST" "$LOCAL_USER" "$LOCAL_PASS" "" "
     DROP INDEX idx_product_id ON woo_master.temp_categories_tags;
   " 2>/dev/null || true
 
+  run_mysql_query "$LOCAL_HOST" "$LOCAL_USER" "$LOCAL_PASS" "" "
   mysql --local-infile=1 -h "$LOCAL_HOST" -u "$LOCAL_USER" -p"$LOCAL_PASS" -e "
     USE woo_master;
 
