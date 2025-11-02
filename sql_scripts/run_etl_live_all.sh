@@ -79,11 +79,40 @@ run_etl() {
       EXTRA_FILTER=""
     fi
     # 🧠 Special handling for TR: order_number_formatted = order_id
+# 🧠 Special handling for TR and Refunds (generate order_number_formatted)
 if [ "$COUNTRY" = "TR" ]; then
   echo "⚙️ Using order_id as order_number_formatted for TR (no _order_number_formatted key)..."
   ORDER_NUMBER_FIELD="CAST(p.ID AS CHAR) AS order_number_formatted"
 else
-  ORDER_NUMBER_FIELD="MAX(CASE WHEN pm.meta_key = '_order_number_formatted' THEN pm.meta_value END) AS order_number_formatted"
+  # Assign country-specific prefix for refunds
+  case "$COUNTRY" in
+    NL) PREFIX="101" ;;
+    BE) PREFIX="201" ;;
+    DE) PREFIX="301" ;;
+    AT) PREFIX="401" ;;
+    BEFR|BEFRLU) PREFIX="241" ;;
+    FR) PREFIX="501" ;;
+    DK) PREFIX="601" ;;
+    SE) PREFIX="901" ;;
+    FI) PREFIX="641" ;;
+    PT) PREFIX="741" ;;
+    ES) PREFIX="701" ;;
+    IT) PREFIX="801" ;;
+    CZ) PREFIX="461" ;;
+    HU) PREFIX="441" ;;
+    RO) PREFIX="531" ;;
+    SK) PREFIX="561" ;;
+    UK) PREFIX="161" ;;
+    OPS) PREFIX="" ;;  # OPS marketplace has no formatted order number
+    *) PREFIX="" ;;
+  esac
+
+  # Build dynamic SQL field for order_number_formatted
+  ORDER_NUMBER_FIELD="CASE
+    WHEN p.post_type = 'shop_order_refund'
+      THEN CONCAT('$PREFIX', '-REFUND-', CAST(p.ID AS CHAR))
+    ELSE MAX(CASE WHEN pm.meta_key = '_order_number_formatted' THEN pm.meta_value END)
+  END AS order_number_formatted"
 fi
 
   mysql -h "$HOST" -P 3306 -u "$USER" -p"$PASS" "$DB" -e "
@@ -1184,7 +1213,7 @@ run_master_categories_tags_etl() {
 # =========================================================
 # 🚀 Execute All ETL Steps    TR DE FR NL BE AT 
 # =========================================================
-for COUNTRY in DE FR NL BE AT BEFRLU DK ES IT SE FI PT CZ HU RO SK UK OPS; do
+for COUNTRY in TR DE FR NL BE AT BEFRLU DK ES IT SE FI PT CZ HU RO SK UK OPS; do
   run_etl "$COUNTRY"
 done
 run_etl OPS
