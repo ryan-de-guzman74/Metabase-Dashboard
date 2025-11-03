@@ -25,17 +25,17 @@ done
 # =========================================================
 # 🚀 Execute All ETL Steps
 # =========================================================
-#for COUNTRY in TR DE FR NL BE AT BEFRLU DK ES IT SE FI PT CZ HU RO SK UK OPS; do
-#  run_etl "$COUNTRY"
-#done
-#run_etl TR
-#run_master_products_etl
-#run_master_customers_etl
-#run_master_returns_etl
-#run_master_orders_etl
-#run_master_categories_tags_etl
-#run_master_product_gallery_map_etl
-#run_master_product_images_etl
+for COUNTRY in TR DE FR NL BE AT BEFRLU DK ES IT SE FI PT CZ HU RO SK UK OPS; do
+  run_etl "$COUNTRY"
+done
+
+run_master_products_etl
+run_master_customers_etl
+run_master_returns_etl
+run_master_orders_etl
+run_master_categories_tags_etl
+run_master_product_gallery_map_etl
+run_master_product_images_etl
 run_ads_insights_etl
 
 echo "🎯 All ETL operations completed successfully."

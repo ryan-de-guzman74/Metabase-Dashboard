@@ -61,15 +61,24 @@ run_ads_insights_etl() {
   DB_NAME="woo_master"
 
   echo "🧠 Checking last imported date..."
-  LAST_DATE=$(mysql --local-infile=1 -h "$DB_HOST" -P "$DB_PORT" -u"$DB_USER" -p"$DB_PASS" -Nse \
-    "SELECT MAX(date_stop) FROM ${DB_NAME}.advertisements;" 2>/dev/null)
+LAST_DATE=$(mysql --local-infile=1 -h "$DB_HOST" -P "$DB_PORT" -u"$DB_USER" -p"$DB_PASS" -Nse \
+  "SELECT MAX(date_stop) FROM ${DB_NAME}.advertisements;" 2>/dev/null | tr -d '\r')
 
-  if [ -z "$LAST_DATE" ] || [ "$LAST_DATE" = "NULL" ]; then
-    SINCE=$(date -d '60 days ago' +%Y-%m-%d)
-  else
-    SINCE=$(date -d "$LAST_DATE + 1 day" +%Y-%m-%d)
-  fi
-  UNTIL=$(date +%Y-%m-%d)
+TODAY=$(date +%Y-%m-%d)
+
+if [[ -z "$LAST_DATE" || "$LAST_DATE" == "NULL" ]]; then
+  # 🆕 Initial 60-day history
+  SINCE=$(date -d '60 days ago' +%Y-%m-%d)
+elif [[ "$(date -d "$LAST_DATE" +%s)" -ge "$(date -d "$TODAY" +%s)" ]]; then
+  # 🧭 If somehow last date >= today, reset
+  SINCE=$(date -d '60 days ago' +%Y-%m-%d)
+else
+  # ✅ Continue incrementally
+  SINCE=$(date -d "$LAST_DATE + 1 day" +%Y-%m-%d)
+fi
+
+UNTIL="$TODAY"
+echo "📅 Fetching from $SINCE → $UNTIL"
   echo "📅 Fetching from $SINCE → $UNTIL"
 
   # ==========================================
@@ -171,12 +180,23 @@ CREATE TABLE IF NOT EXISTS advertisements (
   UNIQUE KEY uniq_ad (campaign_name, ad_name, date_start)
 );
 
+-- 🧩 Create a temporary table for clean import
+DROP TEMPORARY TABLE IF EXISTS tmp_ads;
+CREATE TEMPORARY TABLE tmp_ads LIKE advertisements;
+
 LOAD DATA LOCAL INFILE '$(realpath "$OUTPUT_CSV")'
-INTO TABLE advertisements
+INTO TABLE tmp_ads
 FIELDS TERMINATED BY ',' ENCLOSED BY '"'
 LINES TERMINATED BY '\n'
 IGNORE 1 ROWS
+(campaign_name, ad_name, adset_name, impressions, clicks, spend, cpc, purchase_roas, date_start, date_stop);
+
+INSERT INTO  advertisements
 (campaign_name, ad_name, adset_name, impressions, clicks, spend, cpc, purchase_roas, date_start, date_stop)
+SELECT
+  campaign_name, ad_name, adset_name, impressions, clicks,
+  spend, cpc, purchase_roas, date_start, date_stop
+FROM tmp_ads
 ON DUPLICATE KEY UPDATE
   impressions=VALUES(impressions),
   clicks=VALUES(clicks),
@@ -184,6 +204,7 @@ ON DUPLICATE KEY UPDATE
   cpc=VALUES(cpc),
   purchase_roas=VALUES(purchase_roas),
   date_stop=VALUES(date_stop);
+DROP TEMPORARY TABLE tmp_ads;
 EOF
 
   echo "✅ Data successfully loaded into MySQL"
