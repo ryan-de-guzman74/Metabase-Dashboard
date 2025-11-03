@@ -1,97 +1,29 @@
 #!/bin/bash
-set -e
-set -o pipefail
-
-# =========================================================
-# 🔄 Reliable MySQL Runner with Retry Logic
-# =========================================================
-run_mysql_query() {
-  local HOST=$1
-  local USER=$2
-  local PASS=$3
-  local DB=$4
-  local QUERY=$5
-  local MAX_RETRIES=3
-  local RETRY_DELAY=5
-
-  for ((attempt=1; attempt<=MAX_RETRIES; attempt++)); do
-    echo "⚙️  [Attempt $attempt/$MAX_RETRIES] Running MySQL query on $DB ..."
-    mysql  --local-infile=1 -h "$HOST" -P 3306 -u "$USER" -p"$PASS" "$DB" -e "$QUERY" && return 0
-    echo "⚠️  Query failed (network/timeout?). Retrying in ${RETRY_DELAY}s..."
-    sleep $RETRY_DELAY
-    RETRY_DELAY=$((RETRY_DELAY * 2)) # exponential backoff
-  done
-
-  echo "❌ MySQL query failed after $MAX_RETRIES attempts — skipping this section."
-  return 1
-}
-
-# =========================================================
-# 🌍 Environment Detection — Works in Docker & Host
-# =========================================================
-#if [ -f "/.dockerenv" ] || grep -qa "docker" /proc/1/cgroup 2>/dev/null; then
-#  ENVIRONMENT="docker"
-#else
-#  ENVIRONMENT="host"
-#fi
-
-# =========================================================
-# 🌍 Universal Path Setup — Works on Both Docker & Ubuntu
-# =========================================================
-
-# Find script directory
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-
-# Determine environment (Docker or Host)
-#if grep -q docker /proc/1/cgroup 2>/dev/null; then
-#  ENVIRONMENT="docker"
-#else
-#  ENVIRONMENT="host"
-#fi
-
-# Load configuration
-if [ -f "$SCRIPT_DIR/etl_config.env" ]; then
-  source "$SCRIPT_DIR/etl_config.env"
-elif [ -f "$SCRIPT_DIR/../etl_config.env" ]; then
-  source "$SCRIPT_DIR/../etl_config.env"
-else
-  echo "❌ etl_config.env not found near $SCRIPT_DIR"
-  exit 1
-fi
-
-# Set log directory
-if [ "$ENVIRONMENT" = "docker" ]; then
-  LOG_DIR="/app/logs"
-else
-  LOG_DIR="$SCRIPT_DIR/logs"
-fi
-mkdir -p "$LOG_DIR"
-
-# Log setup
-LOG_FILE="$LOG_DIR/etl_$(date +%Y-%m-%d).log"
-exec > >(tee -a "$LOG_FILE") 2>&1
-
-echo "🌍 Running in $ENVIRONMENT environment"
-echo "📂 Logs: $LOG_FILE"
-
+source "$(dirname "${BASH_SOURCE[0]}")/utils.sh"
 
 # =========================================================
 # 🧩 WooCommerce ETL per Country
 # =========================================================
 run_etl() {
-  COUNTRY=$1
-  echo "🚀 Starting ETL for $COUNTRY ..."
-  IFS=',' read -r HOST DB USER PASS <<< "${REMOTE_DBS[$COUNTRY]}"
-
-  if [ -z "$HOST" ]; then
-    echo "❌ No remote configuration found for $COUNTRY"
-    return
-  fi
-
+  COUNTRY="$1"  
   # =========================================================
   # 🟡 1️⃣ Extract Orders
   # =========================================================
   echo "📦 Extracting Orders for $COUNTRY ..."
+  # ==========================================
+# 🌍 Configure remote WooCommerce DB connection
+# ==========================================
+IFS=',' read -r HOST DB USER PASS <<< "${REMOTE_DBS[$COUNTRY]}"
+
+if [ -z "$HOST" ] || [ -z "$DB" ] || [ -z "$USER" ] || [ -z "$PASS" ]; then
+  echo "❌ Missing database credentials for $COUNTRY in REMOTE_DBS."
+  return 1
+fi
+
+echo "🔗 Connecting to remote DB for $COUNTRY:"
+echo "   Host: $HOST"
+echo "   DB:   $DB"
+
       # 🆕 With a special conditional tweak for OPS only
     if [ "$COUNTRY" = "OPS" ]; then
       echo "🔎 Detected OPS — applying marketplace filters..."
@@ -577,7 +509,10 @@ fi
   echo "👤 Extracting and aggregating Customers for $COUNTRY ..."
 
   # Step 1️⃣: Extract base customer info
-  run_mysql_query "$HOST" "$USER" "$PASS" "$DB" "" "
+  echo "HST: $HOST, USER: $USER, DB: $DB"
+  run_mysql_query "$HOST" "$USER" "$PASS" "$DB" "
+    SET sql_mode = REPLACE(@@sql_mode, 'NO_ZERO_DATE', '');
+    SET sql_mode = REPLACE(@@sql_mode, 'NO_ZERO_IN_DATE', '');
     SELECT
       u.ID AS customer_id,
       TRIM(
@@ -589,7 +524,7 @@ fi
       ) AS full_name,
       LOWER(u.user_email) AS email,
       bp.meta_value AS phone,
-      u.user_registered AS registered_at,
+      IF(u.user_registered = CAST('0000-00-00 00:00:00' AS CHAR), NULL, u.user_registered) AS registered_at,
       bc.meta_value AS billing_country,
       bci.meta_value AS billing_city
     FROM wp_users u
@@ -603,6 +538,7 @@ fi
     LEFT JOIN wp_usermeta bc  ON u.ID = bc.user_id  AND bc.meta_key  = 'billing_country'
     LEFT JOIN wp_usermeta bci ON u.ID = bci.user_id AND bci.meta_key = 'billing_city';
   " > "temp_${COUNTRY}_customers_base.tsv"
+  echo "📊 $(wc -l < temp_${COUNTRY}_customers_base.tsv) rows in base TSV"
 
   # Step 2️⃣: Aggregate order metrics
   run_mysql_query "$HOST" "$USER" "$PASS" "$DB" "  
@@ -620,6 +556,7 @@ fi
       AND pm.meta_value IS NOT NULL AND pm.meta_value <> ''
     GROUP BY pm.meta_value;
   " > "temp_${COUNTRY}_orders_agg.tsv"
+  echo "📊 $(wc -l < temp_${COUNTRY}_orders_agg.tsv) rows in orders agg TSV"
 
   # Step 3️⃣: Aggregate units sold
   run_mysql_query "$HOST" "$USER" "$PASS" "$DB" "
@@ -632,6 +569,7 @@ fi
     WHERE p.post_type = 'shop_order'
     GROUP BY pm.meta_value;
   " > "temp_${COUNTRY}_units_agg.tsv"
+  echo "📊 $(wc -l < temp_${COUNTRY}_units_agg.tsv) rows in units agg TSV"
 
   # Step 3b️⃣: Aggregate refunds
   run_mysql_query "$HOST" "$USER" "$PASS" "$DB" "
@@ -649,6 +587,7 @@ fi
       AND cust.meta_value IS NOT NULL
     GROUP BY cust.meta_value;
   " > "temp_${COUNTRY}_refunds_agg.tsv"
+  echo "📊 $(wc -l < temp_${COUNTRY}_refunds_agg.tsv) rows in refunds agg TSV"
 
   # Step 4️⃣: Merge and load into local DB
 echo "📥 Loading combined Customers data into woo_${COUNTRY,,}.customers ..."
@@ -674,6 +613,7 @@ fi
       phone VARCHAR(50), registered_at DATETIME,
       billing_country VARCHAR(100), billing_city VARCHAR(100)
     );
+    SET sql_mode = REPLACE(REPLACE(@@sql_mode,'NO_ZERO_DATE',''),'NO_ZERO_IN_DATE','');
     LOAD DATA LOCAL INFILE '$(pwd)/temp_${COUNTRY}_customers_base.tsv'
     INTO TABLE base
     FIELDS TERMINATED BY '\t' LINES TERMINATED BY '\n' IGNORE 1 LINES;
@@ -740,527 +680,3 @@ fi
 
   echo "✅ Customers table built successfully for $COUNTRY."
 }
-
-# =========================================================
-# 🧠 5️⃣ Master Products ETL (OPS + PIM → woo_master.products)
-# =========================================================
-run_master_products_etl() {
-  echo "🧠 Building Master Products Table from OPS ..."
-  IFS=',' read -r HOST DB USER PASS <<< "${REMOTE_DBS["OPS"]}"
-
-  if [ -z "$HOST" ]; then
-    echo "❌ No remote configuration found for OPS"
-    return
-  fi
-
-  run_mysql_query "$HOST" "$USER" "$PASS" "$DB" "
-    SELECT
-      p.ID AS product_id,
-      p.post_title AS title,
-      MAX(CASE WHEN pm.meta_key = '_sku' THEN pm.meta_value END) AS sku,
-      MAX(CASE WHEN pm.meta_key = '_main_SKU' THEN pm.meta_value END) AS parent_sku,
-      MAX(CASE WHEN pm.meta_key = '_product_attributes' THEN pm.meta_value END) AS attributes,
-      MAX(wc.stock_quantity) AS stock_qty,
-      NULL AS categories,
-      NULL AS tags,
-      MAX(CASE WHEN pm.meta_key = '_regular_price' THEN pm.meta_value END) AS regular_price,
-      MAX(CASE WHEN pm.meta_key = '_sale_price' THEN pm.meta_value END) AS sale_price,
-      MAX(CASE WHEN pm.meta_key = '_product_image_gallery' THEN pm.meta_value END) AS image_url,
-      MAX(CASE WHEN pm.meta_key IN ('_alg_wc_cog_cost','_wc_cog_cost') THEN pm.meta_value END) AS cogs
-    FROM wp_posts p
-    LEFT JOIN wp_postmeta pm ON p.ID = pm.post_id
-    LEFT JOIN wp_wc_product_meta_lookup wc ON wc.product_id = p.ID
-    WHERE p.post_type IN ('product','product_variation')
-    GROUP BY p.ID;
-  " > temp_master_products.tsv
-
-  echo "🧩 Loading products into woo_master.products ..."
-  run_mysql_query "$LOCAL_HOST" "$LOCAL_USER" "$LOCAL_PASS" "" "
-    CREATE DATABASE IF NOT EXISTS woo_master;
-    USE woo_master;
-    CREATE TABLE IF NOT EXISTS products (
-      product_id BIGINT PRIMARY KEY,
-      title VARCHAR(255),
-      sku VARCHAR(100),
-      parent_sku VARCHAR(100),
-      attributes LONGTEXT,
-      stock_qty INT,
-      categories VARCHAR(255),
-      tags VARCHAR(255),
-      regular_price DECIMAL(12,2),
-      sale_price DECIMAL(12,2),
-      image_url LONGTEXT,
-      cogs DECIMAL(12,2),
-      created_at DATETIME DEFAULT CURRENT_TIMESTAMP
-    );
-    TRUNCATE TABLE products;
-    LOAD DATA LOCAL INFILE '$(pwd)/temp_master_products.tsv'
-    INTO TABLE products
-    FIELDS TERMINATED BY '\t'
-    LINES TERMINATED BY '\n'
-    IGNORE 1 LINES
-    (product_id, title, sku, parent_sku, attributes, stock_qty, categories, tags, regular_price, sale_price, image_url, cogs);
-  "
-
-  rm -f temp_master_products.tsv
-  echo "✅ Master Products Table built successfully in woo_master.products"
-}
-
-
-# =========================================================
-# 🧩 9️⃣ Merge All Store Orders → woo_master.orders & order_items
-# =========================================================
-run_master_orders_etl() {
-  echo "🧩 Building Master Orders and Order Items Tables from all stores ..."
-
-  run_mysql_query "$LOCAL_HOST" "$LOCAL_USER" "$LOCAL_PASS" "woo_master" "
-    TRUNCATE TABLE orders;
-    TRUNCATE TABLE order_items;
-  "
-
-  for COUNTRY in OPS TR DE FR NL BE BEFRLU AT DK ES IT SE FI PT CZ HU RO SK UK; do
-    echo "🔗 Merging orders and items for $COUNTRY ..."
-    
-  # ⚙️ Check if the store database exists first (safe check)
-  DB_EXISTS=$(mysql -h "$LOCAL_HOST" -u "$LOCAL_USER" -p"$LOCAL_PASS" -N -B -e "
-    SELECT COUNT(*) FROM INFORMATION_SCHEMA.SCHEMATA
-    WHERE SCHEMA_NAME = 'woo_${COUNTRY,,}';
-  " 2>/dev/null || echo 0)
-
-  if [ "$DB_EXISTS" -eq 0 ]; then
-    echo "⚠️  Database woo_${COUNTRY,,} does not exist — skipping $COUNTRY."
-    continue
-  fi
-
-
-    HAS_NAME=$(mysql -h "$LOCAL_HOST" -u "$LOCAL_USER" -p"$LOCAL_PASS" -N -B -e "
-      SELECT COUNT(*) FROM INFORMATION_SCHEMA.COLUMNS
-      WHERE TABLE_SCHEMA = 'woo_${COUNTRY,,}'
-        AND TABLE_NAME = 'order_items'
-        AND COLUMN_NAME = 'order_item_name';
-    ")
-
-    NAME_SELECT=$([ "$HAS_NAME" -eq 1 ] && echo "oi.order_item_name" || echo "NULL")
-
-run_mysql_query "$LOCAL_HOST" "$LOCAL_USER" "$LOCAL_PASS" "woo_master" "
-  SET SESSION sql_mode = REPLACE(REPLACE(@@sql_mode, 'STRICT_TRANS_TABLES', ''), 'NO_ZERO_DATE', '');
-  INSERT INTO woo_master.orders (
-    order_number_formatted, source_store, order_id, order_date, order_status,
-    customer_id, country_code, channel, site, billing_country, billing_city,
-    units_total, ordered_items_count, ordered_items_skus, payment_method,
-    currency_code, subtotal, gross_total, cogs, total_price,
-    tax_amount, shipping_fee, fee_amount, discount_amount,
-    refunded_amount, ads_spend, logistics_cost, other_costs,
-    net_profit, net_revenue, net_margin
-  )
-  SELECT
-    COALESCE(NULLIF(TRIM(o.order_number_formatted), ''), CONCAT('ORD', o.order_id)),
-    '$COUNTRY',
-    o.order_id,
-CASE
-  WHEN o.order_date IS NULL
-       OR TRIM(o.order_date) = ''
-       OR o.order_date IN ('0000-00-00', '0000-00-00 00:00:00')
-  THEN NULL
-  WHEN STR_TO_DATE(o.order_date, '%Y-%m-%d %H:%i:%s') IS NOT NULL
-  THEN STR_TO_DATE(o.order_date, '%Y-%m-%d %H:%i:%s')
-  ELSE NULL
-END AS order_date,
-    o.order_status, o.customer_id,
-    o.country_code, o.channel, o.site, o.billing_country, o.billing_city,
-    o.units_total, o.ordered_items_count, o.ordered_items_skus, o.payment_method,
-    o.currency_code, o.subtotal, o.gross_total, o.cogs, o.total_price,
-    o.tax_amount, o.shipping_fee, o.fee_amount, o.discount_amount,
-    o.refunded_amount, o.ads_spend, o.logistics_cost, o.other_costs,
-    o.net_profit, o.net_revenue, o.net_margin
-  FROM woo_${COUNTRY,,}.orders o
-  WHERE o.order_number_formatted IS NOT NULL
-    AND o.order_number_formatted <> ''
-    AND LENGTH(TRIM(o.order_number_formatted)) > 0
-    AND o.order_number_formatted <> 'NULL';
-"
-
-run_mysql_query "$LOCAL_HOST" "$LOCAL_USER" "$LOCAL_PASS" "woo_master" "
-  INSERT INTO order_items (
-    order_item_id, order_id, product_id, variation_id, sku,
-    order_item_name, quantity, line_total, line_tax,
-    refund_reference, currency_code, source_store
-  )
-  SELECT
-    oi.order_item_id,
-    oi.order_id,
-    oi.product_id,
-    oi.variation_id,
-    oi.sku,
-    oi.order_item_name,
-    oi.quantity,
-    oi.line_total,
-    oi.line_tax,
-    oi.refund_reference,
-    oi.currency_code,
-    '$COUNTRY'
-  FROM woo_${COUNTRY,,}.order_items oi;
-"
-
-  done
-
-  echo "✅ Master Orders and Order Items tables merged successfully."
-}
-
-# =========================================================
-# 🔁 8️⃣ MASTER RETURNS ETL (Laravel Portal → woo_master.returns)
-# =========================================================
-run_master_returns_etl() {
-  echo "🔁 Extracting Returns from Laravel Portal..."
-
-  IFS=',' read -r HOST DB USER PASS <<< "${REMOTE_DBS["RETURNS"]}"
-
-  if [ -z "$HOST" ]; then
-    echo "❌ No remote configuration found for RETURNS"
-    return
-  fi
-
-  # Extract from Laravel portal schema
-  run_mysql_query "$HOST" "$USER" "$PASS" "$DB" "
-    SELECT
-      s.order_id AS order_number,
-      s.order_email,
-      s.order_date,
-      s.created_at AS return_request_date,
-      s.order_site,
-      MAX(sd.shiping_method) AS shipping_method,
-      MAX(sd.shiping_price) AS payment_for_return_fee,
-      s.shipment_status AS return_request_status,
-      COUNT(si.id) AS return_requested_items_count,
-      GROUP_CONCAT(si.product_sku SEPARATOR ', ') AS return_requested_items_sku,
-      GROUP_CONCAT(si.attributes SEPARATOR ' || ') AS return_requested_items_attributes,
-      GROUP_CONCAT(DISTINCT si.return_reason SEPARATOR ', ') AS return_reason,
-      MAX(sd.payment_method) AS return_method,
-      SUM(si.total) AS return_requested_total_amount,
-      MAX(sa.country) AS country_code,
-      MAX(sa.city) AS city,
-      MAX(sd.currency) AS currency
-    FROM shipments s
-    LEFT JOIN shipment_items si ON s.id = si.shipment_id
-    LEFT JOIN shipment_details sd ON s.id = sd.shipment_id
-    LEFT JOIN shipment_addresses sa ON s.id = sa.shipment_id
-    GROUP BY s.id;
-  " > temp_master_returns.tsv
-
-  # Load into master DB
-  echo "📥 Loading returns into woo_master.returns..."
-  run_mysql_query "$LOCAL_HOST" "$LOCAL_USER" "$LOCAL_PASS" "woo_master" "
-    USE woo_master;
-    TRUNCATE TABLE returns;
-    LOAD DATA LOCAL INFILE '$(pwd)/temp_master_returns.tsv'
-    INTO TABLE returns
-    FIELDS TERMINATED BY '\t'
-    LINES TERMINATED BY '\n'
-    IGNORE 1 LINES
-    (order_number, order_email, order_date, return_request_date, order_site,
-     shipping_method, payment_for_return_fee, return_request_status,
-     return_requested_items_count, return_requested_items_sku,
-     return_requested_items_attributes, return_reason, return_method,
-     return_requested_total_amount, country_code, city, currency);
-  "
-
-  rm -f temp_master_returns.tsv
-  echo "✅ Master Returns table updated successfully!"
-}
-
-# =========================================================
-# 👤 10️⃣ MERGE ALL STORE CUSTOMERS → woo_master.customers
-# =========================================================
-run_master_customers_etl() {
-  echo "👥 Building Master Customers Table from all stores ..."
-
-  # 🧹 Clean or create master table
-  run_mysql_query "$LOCAL_HOST" "$LOCAL_USER" "$LOCAL_PASS" "" "
-    CREATE DATABASE IF NOT EXISTS woo_master;
-    USE woo_master;
-    CREATE TABLE IF NOT EXISTS customers (
-      customer_id BIGINT,
-      customer_number_formatted VARCHAR(50),
-      full_name VARCHAR(255),
-      email VARCHAR(255),
-      phone VARCHAR(50),
-      registered_at DATETIME,
-      first_order_date DATETIME,
-      last_order_date DATETIME,
-      orders_count INT,
-      units_total INT,
-      ltv DECIMAL(12,2),
-      aov DECIMAL(12,2),
-      refunds_total DECIMAL(12,2),
-      billing_country VARCHAR(100),
-      billing_city VARCHAR(100),
-      source_store VARCHAR(50),
-      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-      PRIMARY KEY (customer_id, source_store),
-      INDEX idx_customers_email (email)
-    );
-    TRUNCATE TABLE customers;
-  "
-
-  # 🔄 Merge customers from all stores
-  for COUNTRY in TR DE FR NL BE BEFRLU AT DK ES IT SE FI PT CZ HU RO SK UK; do
-    echo "🔗 Merging customers for $COUNTRY ..."
-    
-    
-    # ⚙️ Check if the store database exists first
-    DB_EXISTS=$(mysql -h "$LOCAL_HOST" -u "$LOCAL_USER" -p"$LOCAL_PASS" -N -B -e "
-      SELECT COUNT(*) FROM INFORMATION_SCHEMA.SCHEMATA WHERE SCHEMA_NAME = 'woo_${COUNTRY,,}';
-    ")
-
-    if [ "$DB_EXISTS" -eq 0 ]; then
-      echo "⚠️  Database woo_${COUNTRY,,} does not exist — skipping $COUNTRY."
-      continue
-    fi
-
-    run_mysql_query "$LOCAL_HOST" "$LOCAL_USER" "$LOCAL_PASS" "woo_master" "
-      INSERT INTO customers (
-        customer_number_formatted, customer_id, full_name, email, phone,
-        registered_at, first_order_date, last_order_date,
-        orders_count, units_total, ltv, aov, refunds_total,
-        billing_country, billing_city, source_store
-      )
-      SELECT
-        CASE
-          WHEN '$COUNTRY' = 'TR' THEN CONCAT(c.customer_id)
-          WHEN '$COUNTRY' = 'NL' THEN CONCAT('101-', c.customer_id)
-          WHEN '$COUNTRY' = 'BE' THEN CONCAT('201-', c.customer_id)
-          WHEN '$COUNTRY' = 'DE' THEN CONCAT('301-', c.customer_id)
-          WHEN '$COUNTRY' = 'AT' THEN CONCAT('401-', c.customer_id)
-          WHEN '$COUNTRY' = 'CZ' THEN CONCAT('461-', c.customer_id)
-          WHEN '$COUNTRY' = 'HU' THEN CONCAT('441-', c.customer_id)
-          WHEN '$COUNTRY' = 'BEFRLU' THEN CONCAT('241-', c.customer_id)
-          WHEN '$COUNTRY' = 'FR' THEN CONCAT('501-', c.customer_id)
-          WHEN '$COUNTRY' = 'RO' THEN CONCAT('531-', c.customer_id)
-          WHEN '$COUNTRY' = 'SK' THEN CONCAT('561-', c.customer_id)
-          WHEN '$COUNTRY' = 'FI' THEN CONCAT('641-', c.customer_id)
-          WHEN '$COUNTRY' = 'PT' THEN CONCAT('741-', c.customer_id)
-          WHEN '$COUNTRY' = 'ES' THEN CONCAT('701-', c.customer_id)
-          WHEN '$COUNTRY' = 'IT' THEN CONCAT('801-', c.customer_id)
-          WHEN '$COUNTRY' = 'SE' THEN CONCAT('901-', c.customer_id)
-          WHEN '$COUNTRY' = 'DK' THEN CONCAT('601-', c.customer_id)
-          WHEN '$COUNTRY' = 'UK' THEN CONCAT('161-', c.customer_id)
-          ELSE CONCAT('$COUNTRY', '-', c.customer_id)
-        END AS customer_number_formatted,
-        c.customer_id,
-        c.full_name,
-        c.email,
-        c.phone,
-        c.registered_at,
-        c.first_order_date,
-        c.last_order_date,
-        c.orders_count,
-        c.units_total,
-        c.ltv,
-        c.aov,
-        c.refunds_total,
-        c.billing_country,
-        c.billing_city,
-        '$COUNTRY' AS source_store
-      FROM woo_${COUNTRY,,}.customers c;
-    "
-  done
-
-  echo "✅ Master Customers table merged successfully."
-}
-
-# =========================================================
-# 🧩 7️⃣ NORMALIZE PRODUCT IMAGE GALLERY (OPS → woo_master.product_gallery_map)
-# =========================================================
-run_master_product_gallery_map_etl() {
-  echo "🧩 Building normalized Product Gallery Map from OPS ..."
-
-  IFS=',' read -r HOST DB USER PASS <<< "${REMOTE_DBS["OPS"]}"
-  if [ -z "$HOST" ]; then
-    echo "❌ No remote configuration found for OPS"
-    return
-  fi
-
-  # Step 1️⃣: Extract product_id → comma-separated image_ids from OPS
-  echo "📦 Extracting product → gallery IDs from OPS..."
-  run_mysql_query "$HOST" "$USER" "$PASS" "$DB" "
-    SELECT
-      p.ID AS product_id,
-      MAX(CASE WHEN pm.meta_key = '_product_image_gallery' THEN pm.meta_value END) AS image_ids
-    FROM wp_posts p
-    LEFT JOIN wp_postmeta pm ON p.ID = pm.post_id
-    WHERE p.post_type IN ('product', 'product_variation')
-    GROUP BY p.ID;
-  " > temp_master_gallery_ids.tsv
-
-  # Step 2️⃣: Split comma-separated IDs into normalized rows using Bash + awk
-  echo "🧩 Splitting gallery IDs into product_id, image_id pairs..."
-  awk -F'\t' 'NR>1 {
-    n=split($2, arr, ",");
-    for (i=1; i<=n; i++) if (arr[i] != "") print $1 "\t" arr[i];
-  }' temp_master_gallery_ids.tsv > temp_product_gallery_pairs.tsv
-
-  # Step 3️⃣: Load into local normalized table
-  echo "📥 Creating temporary product_gallery_map and loading data..."
-
-  run_mysql_query "$LOCAL_HOST" "$LOCAL_USER" "$LOCAL_PASS" "woo_master" "
-    DROP TABLE IF EXISTS product_gallery_map;  -- 🧹 ensure old version removed
-    CREATE TABLE product_gallery_map (         -- 🟩 temporary in ETL only
-      product_id BIGINT,
-      image_id BIGINT,
-      PRIMARY KEY (product_id, image_id),
-      INDEX idx_gallery_image_id (image_id)
-    );
-    LOAD DATA LOCAL INFILE '$(pwd)/temp_product_gallery_pairs.tsv'
-    INTO TABLE product_gallery_map
-    FIELDS TERMINATED BY '\t'
-    LINES TERMINATED BY '\n'
-    (product_id, image_id);
-  "
-
-  # 🧹 Cleanup
-  rm -f temp_master_gallery_ids.tsv temp_product_gallery_pairs.tsv
-  echo "✅ Normalized product_gallery_map table built successfully in woo_master."
-}
-
-# =========================================================
-# 🖼️ MASTER PRODUCT IMAGES ETL (OPS → woo_master.products)
-# =========================================================
-run_master_product_images_etl() {
-  echo "🖼️ Updating Master Product Image URLs (normalized join)..."
-
-  run_mysql_query "$LOCAL_HOST" "$LOCAL_USER" "$LOCAL_PASS" "woo_master" "
-    DROP TABLE IF EXISTS temp_image_urls;
-    CREATE TABLE temp_image_urls (
-      image_id BIGINT,
-      image_url TEXT
-    );
-  "
-
-  IFS=',' read -r HOST DB USER PASS <<< "${REMOTE_DBS["OPS"]}"
-  run_mysql_query "$HOST" "$USER" "$PASS" "$DB" "
-    SELECT ID AS image_id, guid AS image_url
-    FROM wp_posts
-    WHERE post_type='attachment' AND post_mime_type LIKE 'image/%';
-  " > temp_master_image_urls.tsv
-
-  run_mysql_query "$LOCAL_HOST" "$LOCAL_USER" "$LOCAL_PASS" "woo_master" "
-    USE woo_master;
-    LOAD DATA LOCAL INFILE '$(pwd)/temp_master_image_urls.tsv'
-    INTO TABLE temp_image_urls
-    FIELDS TERMINATED BY '\t' LINES TERMINATED BY '\n' IGNORE 1 LINES;
-    CREATE INDEX idx_temp_image_id ON temp_image_urls (image_id);
-  "
-
-  # ✅ Now join normalized map + URLs to update products
-  run_mysql_query "$LOCAL_HOST" "$LOCAL_USER" "$LOCAL_PASS" "woo_master" " 
-    SET SESSION group_concat_max_len = 1000000;  -- 🧠 allow long URL lists
-
-    UPDATE products p
-    LEFT JOIN (
-      SELECT g.product_id, GROUP_CONCAT(i.image_url ORDER BY i.image_id SEPARATOR ',') AS urls
-      FROM product_gallery_map g
-      LEFT JOIN temp_image_urls i ON g.image_id = i.image_id
-      GROUP BY g.product_id
-    ) img ON p.product_id = img.product_id
-    SET p.image_url = img.urls;
-
-    DROP TABLE temp_image_urls;
-    DROP TABLE IF EXISTS product_gallery_map;  
-  "
-
-  rm -f temp_master_image_urls.tsv
-  echo "✅ Master Products updated with image URLs using normalized mapping."
-}
-
-# =========================================================
-# 🏷️ 6️⃣ MASTER CATEGORIES & TAGS ETL (OPS → woo_master.products)
-# =========================================================
-run_master_categories_tags_etl() {
-  echo "🏷️ Building Categories & Tags data from OPS ..."
-
-  IFS=',' read -r HOST DB USER PASS <<< "${REMOTE_DBS["OPS"]}"
-
-  if [ -z "$HOST" ]; then
-    echo "❌ No remote configuration found for OPS"
-    return
-  fi
-
-  # ✅ Extract category & tag data for all products
-  echo "📦 Extracting Categories & Tags from OPS..."
-  run_mysql_query "$HOST" "$USER" "$PASS" "$DB" "
-    SELECT
-      tr.object_id AS product_id,
-      GROUP_CONCAT(DISTINCT CASE WHEN tt.taxonomy = 'product_cat' THEN t.name END SEPARATOR ',') AS categories,
-      GROUP_CONCAT(DISTINCT CASE WHEN tt.taxonomy <> 'product_cat' THEN t.name END SEPARATOR ',') AS tags
-    FROM wp_term_relationships tr
-    INNER JOIN wp_term_taxonomy tt ON tr.term_taxonomy_id = tt.term_taxonomy_id
-    INNER JOIN wp_terms t ON tt.term_id = t.term_id
-    GROUP BY tr.object_id;
-  " > temp_master_categories_tags.tsv
-
-  # ✅ Step 2: Prepare target temp table
-  echo "🧱 Preparing temp table in woo_master..."
-  run_mysql_query "$LOCAL_HOST" "$LOCAL_USER" "$LOCAL_PASS" "woo_master" "
-    DROP TABLE IF EXISTS temp_categories_tags;
-    CREATE TABLE temp_categories_tags (
-      product_id BIGINT,
-      categories TEXT,
-      tags TEXT
-    );
-  "
-
-  # ✅ Step 3: Load extracted TSV file
-  echo "📥 Loading category/tag data into temp table..."
-  run_mysql_query "$LOCAL_HOST" "$LOCAL_USER" "$LOCAL_PASS" "woo_master" "
-    LOAD DATA LOCAL INFILE '$(pwd)/temp_master_categories_tags.tsv'
-    INTO TABLE temp_categories_tags
-    FIELDS TERMINATED BY '\t'
-    LINES TERMINATED BY '\n'
-    IGNORE 1 LINES
-    (product_id, categories, tags);
-  "
-
-  # ✅ Step 4: Create index
-  echo "⚙️  Creating index for fast joins..."
-  run_mysql_query "$LOCAL_HOST" "$LOCAL_USER" "$LOCAL_PASS" "woo_master" "
-    CREATE INDEX idx_temp_product_id ON temp_categories_tags (product_id);
-  " 2>/dev/null || true
-
-  # ✅ Step 5: Update products table
-  echo "🔗 Updating master products table..."
-  run_mysql_query "$LOCAL_HOST" "$LOCAL_USER" "$LOCAL_PASS" "woo_master" "
-    UPDATE products p
-    INNER JOIN temp_categories_tags ct ON p.product_id = ct.product_id
-    SET p.categories = ct.categories,
-        p.tags = ct.tags;
-  "
-
-  # ✅ Step 6: Cleanup
-  echo "🧹 Cleaning up temp files..."
-  run_mysql_query "$LOCAL_HOST" "$LOCAL_USER" "$LOCAL_PASS" "woo_master" "
-    DROP TABLE IF EXISTS temp_categories_tags;
-  "
-  rm -f temp_master_categories_tags.tsv
-
-  echo "✅ Categories & Tags fields updated successfully in woo_master.products"
-}
-
-
-# =========================================================
-# 🚀 Execute All ETL Steps    TR DE FR NL BE AT 
-# =========================================================
-for COUNTRY in TR DE FR NL BE AT BEFRLU DK ES IT SE FI PT CZ HU RO SK UK OPS; do
-  run_etl "$COUNTRY"
-done
-
-run_etl OPS
-run_master_products_etl
-run_master_customers_etl
-run_master_returns_etl
-run_master_orders_etl
-run_master_categories_tags_etl
-run_master_product_gallery_map_etl
-run_master_product_images_etl
-
-echo "🎯 All ETL operations completed successfully."
-

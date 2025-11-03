@@ -56,7 +56,8 @@ services:
       - ENVIRONMENT=docker
     volumes:
       - ./sql_scripts:/app/sql_scripts:rw
-      - ./sql_scripts/run_etl_live_all.sh:/app/run_etl_live_all.sh:rw
+      - ./etl.sh:/app/etl.sh:rw
+      - ./lib:/app/lib:rw
       - ./etl_config.env:/app/etl_config.env:rw
       - ./logs:/app/logs
     entrypoint: >
@@ -64,7 +65,7 @@ services:
         export ENVIRONMENT=docker &&
         apt update -qq &&
         apt install -y -qq mysql-client curl jq &&
-        chmod +x /app/run_etl_live_all.sh &&
+        chmod +x /app/etl.sh &&
         mkdir -p /app/logs &&
         echo '⏳ Waiting for MySQL to be ready...' &&
         until mysql -h mysql -u root -prootpass -e 'SELECT 1;' >/dev/null 2>&1; do sleep 5; done &&
@@ -75,7 +76,7 @@ services:
           LOG_FILE=/app/logs/etl_$(date +%Y-%m-%d_%H-%M).log;
           echo '⏰ Starting ETL at' $(date) | tee -a $$LOG_FILE;
           start_time=$$(date +%s);
-          /app/run_etl_live_all.sh 2>&1 | tee -a $$LOG_FILE;
+          /app/etl.sh 2>&1 | tee -a $$LOG_FILE;
           exit_code=$$?;
           end_time=$$(date +%s);
           duration=$$((end_time - start_time));
