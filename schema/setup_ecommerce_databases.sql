@@ -240,4 +240,24 @@ CREATE TABLE advertisements (
   UNIQUE KEY uniq_ad_date (ad_name, date_start)
 );
 
+DROP TABLE IF EXISTS woo_master.exchange_rates;
+CREATE TABLE IF NOT EXISTS woo_master.exchange_rates (
+  currency_code VARCHAR(10) PRIMARY KEY,
+  rate_to_eur DECIMAL(12,6),
+  last_updated TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+INSERT INTO woo_master.exchange_rates (currency_code, rate_to_eur)
+VALUES
+('EUR', 1.000000),
+('GBP', 1.165000),
+('DKK', 0.134000),
+('SEK', 0.087000),
+('CZK', 0.040000),
+('HUF', 0.002500),
+('RON', 0.201000),
+('TRY', 0.028000)
+ON DUPLICATE KEY UPDATE
+  rate_to_eur = VALUES(rate_to_eur),
+  last_updated = CURRENT_TIMESTAMP;
+
 SELECT '✅ Production schema setup complete.' AS status;

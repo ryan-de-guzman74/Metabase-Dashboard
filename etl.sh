@@ -25,11 +25,11 @@ done
 # =========================================================
 # 🚀 Execute All ETL Steps
 # =========================================================
-#for COUNTRY in TR DE FR NL BE AT BEFRLU DK ES IT SE FI PT CZ HU RO SK UK OPS; do
-#  run_etl "$COUNTRY"
-#done
-run_etl TR
-run_etl DE
+for COUNTRY in TR DE FR NL BE AT BEFRLU DK ES IT SE FI PT CZ HU RO SK UK OPS; do
+  run_etl "$COUNTRY"
+done
+#run_etl TR
+#run_etl DE
 run_master_products_etl
 run_master_customers_etl
 run_master_returns_etl

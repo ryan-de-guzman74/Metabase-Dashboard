@@ -425,20 +425,23 @@ run_etl() {
   # --- Update COGS in local orders ---
   run_mysql_query "$LOCAL_HOST" "$LOCAL_USER" "$LOCAL_PASS" "" "
     USE woo_${COUNTRY,,};
-    UPDATE orders o
-    JOIN (
-      SELECT 
-        oi.order_id,
-        SUM(
-          CAST(oi.quantity AS DECIMAL(12,4)) *
-          CAST(pc.cog_value AS DECIMAL(12,4))
-        ) AS total_cogs
-      FROM order_items oi
-      JOIN woo_master.pim_cogs pc
-        ON pc.product_id = oi.product_id
-      GROUP BY oi.order_id
-    ) calc ON o.order_id = calc.order_id
-    SET o.cogs = calc.total_cogs;
+    -- (Preserve logic for future reactivation)
+    -- UPDATE orders o
+    -- JOIN (
+    --   SELECT 
+    --     oi.order_id,
+    --     SUM(
+    --       CAST(oi.quantity AS DECIMAL(12,4)) *
+    --       CAST(pc.cog_value AS DECIMAL(12,4))
+    --     ) AS total_cogs
+    --   FROM order_items oi
+    --   JOIN woo_master.pim_cogs pc
+    --     ON pc.product_id = oi.product_id
+    --   GROUP BY oi.order_id
+    -- ) calc ON o.order_id = calc.order_id
+    -- SET o.cogs = calc.total_cogs;
+    -- 🚀 Temporary override: set everything to 0
+    UPDATE orders SET cogs = 0;
   "
   # Drop the staging table afterward
   run_mysql_query "$LOCAL_HOST" "$LOCAL_USER" "$LOCAL_PASS" "" "

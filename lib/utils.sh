@@ -16,7 +16,7 @@ run_mysql_query() {
 
   for ((attempt=1; attempt<=MAX_RETRIES; attempt++)); do
     echo "⚙️  [Attempt $attempt/$MAX_RETRIES] Running MySQL query on $DB ..."
-    mysql --local-infile=1 -h "$HOST" -P 3306 -u "$USER" -p"$PASS" "$DB" -e "$QUERY" && return 0
+    mysql --local-infile=1 --skip-column-names -h "$HOST" -P 3306 -u "$USER" -p"$PASS" "$DB" -e "$QUERY" && return 0
     echo "⚠️  Query failed. Retrying in ${RETRY_DELAY}s..."
     sleep $RETRY_DELAY
     RETRY_DELAY=$((RETRY_DELAY * 2))
