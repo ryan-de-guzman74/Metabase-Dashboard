@@ -11,65 +11,65 @@ run_etl() {
   # =========================================================
   echo "📦 Extracting Orders for $COUNTRY ..."
   # ==========================================
-# 🌍 Configure remote WooCommerce DB connection
-# ==========================================
-IFS=',' read -r HOST DB USER PASS <<< "${REMOTE_DBS[$COUNTRY]}"
+  # 🌍 Configure remote WooCommerce DB connection
+  # ==========================================
+  IFS=',' read -r HOST DB USER PASS <<< "${REMOTE_DBS[$COUNTRY]}"
 
-if [ -z "$HOST" ] || [ -z "$DB" ] || [ -z "$USER" ] || [ -z "$PASS" ]; then
-  echo "❌ Missing database credentials for $COUNTRY in REMOTE_DBS."
-  return 1
-fi
+  if [ -z "$HOST" ] || [ -z "$DB" ] || [ -z "$USER" ] || [ -z "$PASS" ]; then
+    echo "❌ Missing database credentials for $COUNTRY in REMOTE_DBS."
+    return 1
+  fi
 
-echo "🔗 Connecting to remote DB for $COUNTRY:"
-echo "   Host: $HOST"
-echo "   DB:   $DB"
+  echo "🔗 Connecting to remote DB for $COUNTRY:"
+  echo "   Host: $HOST"
+  echo "   DB:   $DB"
 
-      # 🆕 With a special conditional tweak for OPS only
-    if [ "$COUNTRY" = "OPS" ]; then
-      echo "🔎 Detected OPS — applying marketplace filters..."
-      EXTRA_FILTER="AND p.ID IN (
-        SELECT post_id FROM wp_postmeta
-        WHERE meta_key='_payment_method' AND meta_value IN ('bol','other')
-      )"
-    else
-      EXTRA_FILTER=""
-    fi
-    # 🧠 Special handling for TR: order_number_formatted = order_id
-# 🧠 Special handling for TR and Refunds (generate order_number_formatted)
-if [ "$COUNTRY" = "TR" ]; then
-  echo "⚙️ Using order_id as order_number_formatted for TR (no _order_number_formatted key)..."
-  ORDER_NUMBER_FIELD="CAST(p.ID AS CHAR) AS order_number_formatted"
-else
-  # Assign country-specific prefix for refunds
-  case "$COUNTRY" in
-    NL) PREFIX="101" ;;
-    BE) PREFIX="201" ;;
-    DE) PREFIX="301" ;;
-    AT) PREFIX="401" ;;
-    BEFR|BEFRLU) PREFIX="241" ;;
-    FR) PREFIX="501" ;;
-    DK) PREFIX="601" ;;
-    SE) PREFIX="901" ;;
-    FI) PREFIX="641" ;;
-    PT) PREFIX="741" ;;
-    ES) PREFIX="701" ;;
-    IT) PREFIX="801" ;;
-    CZ) PREFIX="461" ;;
-    HU) PREFIX="441" ;;
-    RO) PREFIX="531" ;;
-    SK) PREFIX="561" ;;
-    UK) PREFIX="161" ;;
-    OPS) PREFIX="" ;;  # OPS marketplace has no formatted order number
-    *) PREFIX="" ;;
-  esac
+  # 🆕 With a special conditional tweak for OPS only
+  if [ "$COUNTRY" = "OPS" ]; then
+    echo "🔎 Detected OPS — applying marketplace filters..."
+    EXTRA_FILTER="AND p.ID IN (
+      SELECT post_id FROM wp_postmeta
+      WHERE meta_key='_payment_method' AND meta_value IN ('bol','other')
+    )"
+  else
+    EXTRA_FILTER=""
+  fi
+  # 🧠 Special handling for TR: order_number_formatted = order_id
+  # 🧠 Special handling for TR and Refunds (generate order_number_formatted)
+  if [ "$COUNTRY" = "TR" ]; then
+    echo "⚙️ Using order_id as order_number_formatted for TR (no _order_number_formatted key)..."
+    ORDER_NUMBER_FIELD="CAST(p.ID AS CHAR) AS order_number_formatted"
+  else
+    # Assign country-specific prefix for refunds
+    case "$COUNTRY" in
+      NL) PREFIX="101" ;;
+      BE) PREFIX="201" ;;
+      DE) PREFIX="301" ;;
+      AT) PREFIX="401" ;;
+      BEFR|BEFRLU) PREFIX="241" ;;
+      FR) PREFIX="501" ;;
+      DK) PREFIX="601" ;;
+      SE) PREFIX="901" ;;
+      FI) PREFIX="641" ;;
+      PT) PREFIX="741" ;;
+      ES) PREFIX="701" ;;
+      IT) PREFIX="801" ;;
+      CZ) PREFIX="461" ;;
+      HU) PREFIX="441" ;;
+      RO) PREFIX="531" ;;
+      SK) PREFIX="561" ;;
+      UK) PREFIX="161" ;;
+      OPS) PREFIX="" ;;  # OPS marketplace has no formatted order number
+      *) PREFIX="" ;;
+    esac
 
-  # Build dynamic SQL field for order_number_formatted
-  ORDER_NUMBER_FIELD="CASE
-    WHEN p.post_type = 'shop_order_refund'
-      THEN CONCAT('$PREFIX', '-REFUND-', CAST(p.ID AS CHAR))
-    ELSE MAX(CASE WHEN pm.meta_key = '_order_number_formatted' THEN pm.meta_value END)
-  END AS order_number_formatted"
-fi
+    # Build dynamic SQL field for order_number_formatted
+    ORDER_NUMBER_FIELD="CASE
+      WHEN p.post_type = 'shop_order_refund'
+        THEN CONCAT('$PREFIX', '-REFUND-', CAST(p.ID AS CHAR))
+      ELSE MAX(CASE WHEN pm.meta_key = '_order_number_formatted' THEN pm.meta_value END)
+    END AS order_number_formatted"
+  fi
 
   run_mysql_query "$HOST" "$USER" "$PASS" "$DB" "
     SELECT DISTINCT
@@ -319,29 +319,29 @@ fi
   " > "temp_${COUNTRY}_order_items.tsv"
 
   echo "📥 Loading Order Items (no SKU yet) into local DB..."
-if [ "$COUNTRY" != "TR" ]; then
-  echo "🧱 Creating table order_items in woo_${COUNTRY,,}..."
-  run_mysql_query "$LOCAL_HOST" "$LOCAL_USER" "$LOCAL_PASS" "woo_${COUNTRY,,}" "
-    USE woo_${COUNTRY,,};
-    CREATE TABLE IF NOT EXISTS order_items LIKE woo_tr.order_items;
-    TRUNCATE TABLE order_items;
-    LOAD DATA LOCAL INFILE '$(pwd)/temp_${COUNTRY}_order_items.tsv'
-    INTO TABLE order_items
-    FIELDS TERMINATED BY '\t'
-    LINES TERMINATED BY '\n'
-    IGNORE 1 LINES;
-  "
-else
-  echo "⚙️ Skipping schema clone for TR (base schema already exists)."
-  run_mysql_query "$LOCAL_HOST" "$LOCAL_USER" "$LOCAL_PASS" "woo_tr" "
-    TRUNCATE TABLE order_items;
-    LOAD DATA LOCAL INFILE '$(pwd)/temp_${COUNTRY}_order_items.tsv'
-    INTO TABLE order_items
-    FIELDS TERMINATED BY '\t'
-    LINES TERMINATED BY '\n'
-    IGNORE 1 LINES;
-  "
-fi
+  if [ "$COUNTRY" != "TR" ]; then
+    echo "🧱 Creating table order_items in woo_${COUNTRY,,}..."
+    run_mysql_query "$LOCAL_HOST" "$LOCAL_USER" "$LOCAL_PASS" "woo_${COUNTRY,,}" "
+      USE woo_${COUNTRY,,};
+      CREATE TABLE IF NOT EXISTS order_items LIKE woo_tr.order_items;
+      TRUNCATE TABLE order_items;
+      LOAD DATA LOCAL INFILE '$(pwd)/temp_${COUNTRY}_order_items.tsv'
+      INTO TABLE order_items
+      FIELDS TERMINATED BY '\t'
+      LINES TERMINATED BY '\n'
+      IGNORE 1 LINES;
+    "
+  else
+    echo "⚙️ Skipping schema clone for TR (base schema already exists)."
+    run_mysql_query "$LOCAL_HOST" "$LOCAL_USER" "$LOCAL_PASS" "woo_tr" "
+      TRUNCATE TABLE order_items;
+      LOAD DATA LOCAL INFILE '$(pwd)/temp_${COUNTRY}_order_items.tsv'
+      INTO TABLE order_items
+      FIELDS TERMINATED BY '\t'
+      LINES TERMINATED BY '\n'
+      IGNORE 1 LINES;
+    "
+  fi
 
   rm -f "temp_${COUNTRY}_order_items.tsv"
   echo "✅ Order Items for $COUNTRY loaded successfully."
@@ -590,21 +590,21 @@ fi
   echo "📊 $(wc -l < temp_${COUNTRY}_refunds_agg.tsv) rows in refunds agg TSV"
 
   # Step 4️⃣: Merge and load into local DB
-echo "📥 Loading combined Customers data into woo_${COUNTRY,,}.customers ..."
+  echo "📥 Loading combined Customers data into woo_${COUNTRY,,}.customers ..."
 
-if [ "$COUNTRY" != "TR" ]; then
-  run_mysql_query "$LOCAL_HOST" "$LOCAL_USER" "$LOCAL_PASS" "" "
-    USE woo_${COUNTRY,,};
-    CREATE TABLE IF NOT EXISTS customers LIKE woo_tr.customers;
-    TRUNCATE TABLE customers;
-  "
-else
-  echo "⚙️ Skipping schema clone for TR (base schema already exists)."
-  run_mysql_query "$LOCAL_HOST" "$LOCAL_USER" "$LOCAL_PASS" "" "
-    USE woo_tr;
-    TRUNCATE TABLE customers;
-  "
-fi
+  if [ "$COUNTRY" != "TR" ]; then
+    run_mysql_query "$LOCAL_HOST" "$LOCAL_USER" "$LOCAL_PASS" "" "
+      USE woo_${COUNTRY,,};
+      CREATE TABLE IF NOT EXISTS customers LIKE woo_tr.customers;
+      TRUNCATE TABLE customers;
+    "
+  else
+    echo "⚙️ Skipping schema clone for TR (base schema already exists)."
+    run_mysql_query "$LOCAL_HOST" "$LOCAL_USER" "$LOCAL_PASS" "" "
+      USE woo_tr;
+      TRUNCATE TABLE customers;
+    "
+  fi
 
   run_mysql_query "$LOCAL_HOST" "$LOCAL_USER" "$LOCAL_PASS" "" "
     USE woo_${COUNTRY,,};

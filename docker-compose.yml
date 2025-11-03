@@ -54,8 +54,10 @@ services:
     working_dir: /app
     environment: 
       - ENVIRONMENT=docker
+      - LANG=en_US.UTF-8
+      - LC_ALL=en_US.UTF-8
     volumes:
-      - ./sql_scripts:/app/sql_scripts:rw
+      - ./schema:/app/schema:rw
       - ./etl.sh:/app/etl.sh:rw
       - ./lib:/app/lib:rw
       - ./etl_config.env:/app/etl_config.env:rw
@@ -63,14 +65,18 @@ services:
     entrypoint: >
       /bin/bash -c "
         export ENVIRONMENT=docker &&
+        export LANG=en_US.UTF-8 &&
+        export LC_ALL=en_US.UTF-8 && 
         apt update -qq &&
-        apt install -y -qq mysql-client curl jq &&
+        apt install -y -qq mysql-client curl jq locales &&
+        locale-gen en_US.UTF-8 && \
+        update-locale LANG=en_US.UTF-8 LC_ALL=en_US.UTF-8 &&
         chmod +x /app/etl.sh &&
         mkdir -p /app/logs &&
         echo '⏳ Waiting for MySQL to be ready...' &&
         until mysql -h mysql -u root -prootpass -e 'SELECT 1;' >/dev/null 2>&1; do sleep 5; done &&
         echo '✅ MySQL ready. Checking schema...' &&
-        mysql -h mysql -u root -prootpass < /app/sql_scripts/setup_ecommerce_databases.sql &&
+        mysql -h mysql -u root -prootpass < /app/schema/setup_ecommerce_databases.sql &&
         echo '✅ Schema ready. Starting ETL loop...' &&
         while true; do
           LOG_FILE=/app/logs/etl_$(date +%Y-%m-%d_%H-%M).log;
