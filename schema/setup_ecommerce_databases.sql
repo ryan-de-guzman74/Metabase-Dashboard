@@ -260,4 +260,50 @@ ON DUPLICATE KEY UPDATE
   rate_to_eur = VALUES(rate_to_eur),
   last_updated = CURRENT_TIMESTAMP;
 
-SELECT '✅ Production schema setup complete.' AS status;
+
+-- -- =========================================================
+-- -- 💶 Create EUR Orders Table
+-- -- =========================================================
+USE woo_master;
+
+-- Drop existing if needed
+DROP TABLE IF EXISTS woo_master.vw_customers_eur;
+-- ============================================================
+-- 🧩 TABLE: customer_eur
+-- Purpose: Materialized version of customer data with EUR values
+-- ============================================================
+
+CREATE TABLE woo_master.vw_customers_eur AS
+SELECT
+    c.customer_id,
+    c.full_name,
+    c.email,
+    c.source_store,
+    c.billing_country,
+    c.billing_city,
+    c.ltv AS original_ltv,
+    COALESCE(er.rate_to_eur, 1.0) AS rate_to_eur,
+    ROUND(c.ltv * er.rate_to_eur, 2) AS ltv_eur,
+    c.orders_count,
+    c.aov,
+    c.units_total,
+    c.registered_at,
+    c.last_order_date
+FROM woo_master.customers c
+LEFT JOIN woo_master.exchange_rates er
+  ON CASE
+    WHEN c.source_store LIKE '%FR%' THEN 'EUR'
+    WHEN c.source_store LIKE '%TR%' THEN 'TRY'
+    WHEN c.source_store LIKE '%HU%' THEN 'HUF'
+    WHEN c.source_store LIKE '%DK%' THEN 'DKK'
+    WHEN c.source_store LIKE '%CZ%' THEN 'CZK'
+    WHEN c.source_store LIKE '%RO%' THEN 'RON'
+    WHEN c.source_store LIKE '%SE%' THEN 'SEK'
+    WHEN c.source_store LIKE '%GB%' THEN 'GBP'
+    ELSE 'EUR'
+  END = er.currency_code;
+
+
+
+
+-- SELECT '✅ Production schema setup complete.' AS status;

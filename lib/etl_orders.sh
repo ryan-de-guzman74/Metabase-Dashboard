@@ -474,23 +474,23 @@ run_etl() {
     UPDATE orders
     SET 
       net_revenue = ROUND(
-        (gross_total - discount_amount - refunded_amount),
+        (gross_total - discount_amount + refunded_amount),
         2
       ),
       net_profit = ROUND(
-        (gross_total - discount_amount - refunded_amount)
+        (gross_total - discount_amount + refunded_amount)
         - (cogs + logistics_cost + ads_spend + other_costs),
         2
       ),
       net_margin = CASE 
-        WHEN (gross_total - discount_amount - refunded_amount) > 0
+        WHEN (gross_total - discount_amount + refunded_amount) > 0
           THEN GREATEST(
             LEAST(
               ROUND(
                 (
-                  ((gross_total - discount_amount - refunded_amount)
+                  ((gross_total - discount_amount + refunded_amount)
                   - (cogs + logistics_cost + ads_spend + other_costs))
-                  / (gross_total - discount_amount - refunded_amount)
+                  / (gross_total - discount_amount + refunded_amount)
                 ) * 100,
                 2
               ),
@@ -518,13 +518,16 @@ run_etl() {
     SET sql_mode = REPLACE(@@sql_mode, 'NO_ZERO_IN_DATE', '');
     SELECT
       u.ID AS customer_id,
-      TRIM(
-        CONCAT_WS(' ',
-          NULLIF(CONCAT_WS(' ', COALESCE(fn.meta_value, ''), COALESCE(ln.meta_value, '')), ''),
-          NULLIF(CONCAT_WS(' ', COALESCE(bfn.meta_value, ''), COALESCE(bln.meta_value, '')), ''),
-          NULLIF(CONCAT_WS(' ', COALESCE(sfn.meta_value, ''), COALESCE(sln.meta_value, '')), '')
-        )
-      ) AS full_name,
+      CASE
+        WHEN (fn.meta_value IS NOT NULL AND fn.meta_value <> '') 
+          OR (ln.meta_value IS NOT NULL AND ln.meta_value <> '') THEN
+            TRIM(CONCAT_WS(' ', fn.meta_value, ln.meta_value))
+        WHEN (bfn.meta_value IS NOT NULL AND bfn.meta_value <> '') 
+          OR (bln.meta_value IS NOT NULL AND bln.meta_value <> '') THEN
+            TRIM(CONCAT_WS(' ', bfn.meta_value, bln.meta_value))
+        ELSE
+            TRIM(CONCAT_WS(' ', sfn.meta_value, sln.meta_value))
+      END AS full_name,
       LOWER(u.user_email) AS email,
       bp.meta_value AS phone,
       IF(u.user_registered = CAST('0000-00-00 00:00:00' AS CHAR), NULL, u.user_registered) AS registered_at,

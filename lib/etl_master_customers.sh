@@ -81,9 +81,50 @@ run_master_customers_etl() {
         c.billing_country,
         c.billing_city,
         '$COUNTRY' AS source_store
-      FROM woo_${COUNTRY,,}.customers c;
+        FROM woo_${COUNTRY,,}.customers c;
     "
   done
+
+  run_mysql_query "$LOCAL_HOST" "$LOCAL_USER" "$LOCAL_PASS" "woo_master" "
+      SET SESSION sql_mode = REPLACE(@@sql_mode, 'STRICT_TRANS_TABLES', '');
+      USE woo_master;
+DROP TABLE IF EXISTS woo_master.vw_customers_eur;
+
+CREATE TABLE woo_master.vw_customers_eur AS
+SELECT
+    woo_master.customers.customer_id,
+    woo_master.customers.full_name,
+    woo_master.customers.email,
+    woo_master.customers.source_store,
+    woo_master.customers.billing_country,
+    woo_master.customers.billing_city,
+    woo_master.customers.ltv AS original_ltv,
+    woo_master.customers.aov AS original_aov,
+    COALESCE(woo_master.exchange_rates.rate_to_eur, 1.0) AS rate_to_eur,
+    ROUND(woo_master.customers.ltv * COALESCE(woo_master.exchange_rates.rate_to_eur, 1.0), 2) AS ltv_eur,
+    ROUND(woo_master.customers.aov * COALESCE(woo_master.exchange_rates.rate_to_eur, 1.0), 2) AS aov_eur,
+    woo_master.customers.orders_count,
+    woo_master.customers.units_total,
+    woo_master.customers.registered_at,
+    woo_master.customers.last_order_date
+FROM woo_master.customers
+LEFT JOIN woo_master.exchange_rates
+  ON (
+    CASE
+      WHEN woo_master.customers.source_store LIKE '%FR%' THEN 'EUR'
+      WHEN woo_master.customers.source_store LIKE '%TR%' THEN 'TRY'
+      WHEN woo_master.customers.source_store LIKE '%HU%' THEN 'HUF'
+      WHEN woo_master.customers.source_store LIKE '%DK%' THEN 'DKK'
+      WHEN woo_master.customers.source_store LIKE '%CZ%' THEN 'CZK'
+      WHEN woo_master.customers.source_store LIKE '%RO%' THEN 'RON'
+      WHEN woo_master.customers.source_store LIKE '%SE%' THEN 'SEK'
+      WHEN woo_master.customers.source_store LIKE '%GB%' THEN 'GBP'
+      ELSE 'EUR'
+    END
+  ) = woo_master.exchange_rates.currency_code;
+
+
+    "
 
   echo "✅ Master Customers table merged successfully."
 }
